@@ -1,0 +1,192 @@
+syntax = "proto3";
+
+package continuum.sequencer.v1;
+
+// Go package mapping for generated code
+option go_package = "github.com/zerooo111/tick-streamer/proto;continuumv1";
+
+service SequencerService {
+  // Submit a transaction for ordering
+  rpc SubmitTransaction(SubmitTransactionRequest) returns (SubmitTransactionResponse);
+
+  // Submit multiple transactions in batch
+  rpc SubmitBatch(SubmitBatchRequest) returns (SubmitBatchResponse);
+
+  // Get current sequencer status
+  rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
+
+  // Stream live ticks
+  rpc StreamTicks(StreamTicksRequest) returns (stream Tick);
+
+  // Get transaction info by hash
+  rpc GetTransaction(GetTransactionRequest) returns (GetTransactionResponse);
+
+  // Get tick by number
+  rpc GetTick(GetTickRequest) returns (GetTickResponse);
+
+  // Get chain state summary
+  rpc GetChainState(GetChainStateRequest) returns (GetChainStateResponse);
+}
+
+message Transaction {
+  // Unique transaction identifier
+  string tx_id = 1;
+
+  // Transaction payload (application-specific)
+  bytes payload = 2;
+
+  // Client signature
+  bytes signature = 3;
+
+  // Client public key
+  bytes public_key = 4;
+
+  // Nonce for replay protection
+  uint64 nonce = 5;
+
+  // Client-provided timestamp (microseconds since epoch)
+  uint64 timestamp = 6;
+}
+
+message SubmitTransactionRequest {
+  Transaction transaction = 1;
+}
+
+message SubmitTransactionResponse {
+  // Assigned sequence number
+  uint64 sequence_number = 1;
+
+  // Expected tick number for inclusion
+  uint64 expected_tick = 2;
+
+  // Transaction hash
+  string tx_hash = 3;
+}
+
+message SubmitBatchRequest {
+  repeated Transaction transactions = 1;
+}
+
+message SubmitBatchResponse {
+  repeated SubmitTransactionResponse responses = 1;
+}
+
+message GetStatusRequest {}
+
+message GetStatusResponse {
+  // Current tick number
+  uint64 current_tick = 1;
+
+  // Transactions processed
+  uint64 total_transactions = 2;
+
+  // Pending transactions in queue
+  uint64 pending_transactions = 3;
+
+  // Sequencer uptime in seconds
+  uint64 uptime_seconds = 4;
+
+  // Current TPS rate
+  double transactions_per_second = 5;
+}
+
+message StreamTicksRequest {
+  // Start from this tick number (0 = latest)
+  uint64 start_tick = 1;
+}
+
+message Tick {
+  // Tick sequence number
+  uint64 tick_number = 1;
+
+  // VDF proof for this tick
+  VdfProof vdf_proof = 2;
+
+  // Ordered transactions in this tick
+  repeated OrderedTransaction transactions = 3;
+
+  // Hash of all transactions in this tick
+  string transaction_batch_hash = 4;
+
+  // Timestamp when tick was produced
+  uint64 timestamp = 5;
+
+  // Previous tick's VDF output (chaining)
+  string previous_output = 6;
+}
+
+message VdfProof {
+  // VDF input (hex-encoded)
+  string input = 1;
+
+  // VDF output (hex-encoded)
+  string output = 2;
+
+  // VDF proof (hex-encoded)
+  string proof = 3;
+
+  // Number of iterations
+  uint64 iterations = 4;
+}
+
+message OrderedTransaction {
+  // Original transaction
+  Transaction transaction = 1;
+
+  // Assigned sequence number within tick
+  uint64 sequence_number = 2;
+
+  // Transaction hash
+  string tx_hash = 3;
+
+  // Ingestion timestamp
+  uint64 ingestion_timestamp = 4;
+}
+
+// New message types for chain state queries
+message GetTransactionRequest {
+  // Transaction hash (32-bit as hex string)
+  string tx_hash = 1;
+}
+
+message GetTransactionResponse {
+  // Transaction details if found
+  OrderedTransaction transaction = 1;
+
+  // Tick number where transaction was included
+  uint64 tick_number = 2;
+
+  // Whether transaction was found
+  bool found = 3;
+}
+
+message GetTickRequest {
+  uint64 tick_number = 1;
+}
+
+message GetTickResponse {
+  // Tick details if found
+  Tick tick = 1;
+
+  // Whether tick was found
+  bool found = 2;
+}
+
+message GetChainStateRequest {
+  // Optional: limit number of recent ticks returned
+  uint32 tick_limit = 1;
+}
+
+message GetChainStateResponse {
+  // Current chain height (latest tick number)
+  uint64 chain_height = 1;
+
+  // Total number of transactions processed
+  uint64 total_transactions = 2;
+
+  // Recent ticks (up to tick_limit)
+  repeated Tick recent_ticks = 3;
+
+  // Transaction to tick mapping (limited sample)
+  map<string, uint64> tx_to_tick_sample = 4;
+}

@@ -1,0 +1,31 @@
+# General OS/editor noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Go workspace files
+go.work
+go.work.sum
+
+# Build artifacts
+bin/
+build/
+dist/
+
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binaries and coverage
+*.test
+*.out
+
+# Local env
+.env
+
+# Docs not to track here
+help.md
