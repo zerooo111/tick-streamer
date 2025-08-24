@@ -3,9 +3,12 @@ package websocket
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,15 +20,6 @@ import (
 	pb "github.com/zerooo111/tick-streamer/proto"
 )
 
-var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool {
-		// Allow all origins for now - should be configurable in production
-		return true
-	},
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-}
-
 type Client struct {
 	ID        string
 	Conn      *websocket.Conn
@@ -33,18 +27,26 @@ type Client struct {
 	Send      chan []byte
 	StartTick uint64
 	mu        sync.Mutex
+	ClientIP  string  // Track client IP for cleanup
 }
 
 type Hub struct {
-	clients     map[*Client]bool
-	register    chan *Client
-	unregister  chan *Client
-	broadcast   chan []byte
-	grpcAddr    string
-	grpcClient  pb.SequencerServiceClient
-	grpcConn    *grpc.ClientConn
-	mu          sync.RWMutex
-	metrics     HubMetrics
+	clients        map[*Client]bool
+	register       chan *Client
+	unregister     chan *Client
+	broadcast      chan []byte
+	grpcAddr       string
+	grpcClient     pb.SequencerServiceClient
+	grpcConn       *grpc.ClientConn
+	mu             sync.RWMutex
+	metrics        HubMetrics
+	allowedOrigins []string
+	upgrader       websocket.Upgrader
+	
+	// Connection limits
+	maxConnections    int
+	maxConnectionsPerIP int
+	clientsByIP       map[string]int
 }
 
 type HubMetrics struct {
@@ -85,7 +87,7 @@ type ErrorMessage struct {
 	Error string `json:"error"`
 }
 
-func NewHub(grpcAddr string) (*Hub, error) {
+func NewHub(grpcAddr string, allowedOrigins []string) (*Hub, error) {
 	// Create gRPC connection
 	conn, err := grpc.NewClient(grpcAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
@@ -93,17 +95,142 @@ func NewHub(grpcAddr string) (*Hub, error) {
 	}
 
 	hub := &Hub{
-		clients:    make(map[*Client]bool),
-		register:   make(chan *Client),
-		unregister: make(chan *Client),
-		broadcast:  make(chan []byte, 256),
-		grpcAddr:   grpcAddr,
-		grpcClient: pb.NewSequencerServiceClient(conn),
-		grpcConn:   conn,
+		clients:             make(map[*Client]bool),
+		register:            make(chan *Client),
+		unregister:          make(chan *Client),
+		broadcast:           make(chan []byte, 256),
+		grpcAddr:            grpcAddr,
+		grpcClient:          pb.NewSequencerServiceClient(conn),
+		grpcConn:            conn,
+		allowedOrigins:      allowedOrigins,
+		maxConnections:      100,  // Default maximum total connections
+		maxConnectionsPerIP: 10,   // Default maximum connections per IP
+		clientsByIP:         make(map[string]int),
+	}
+
+	// Configure WebSocket upgrader with CORS check
+	hub.upgrader = websocket.Upgrader{
+		CheckOrigin:     hub.checkOrigin,
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
 	}
 
 	go hub.run()
 	return hub, nil
+}
+
+// checkOrigin validates the origin of WebSocket connections
+func (h *Hub) checkOrigin(r *http.Request) bool {
+	// If no allowed origins are configured, reject all connections for security
+	if len(h.allowedOrigins) == 0 {
+		log.Println("Warning: No allowed origins configured, rejecting WebSocket connection")
+		return false
+	}
+
+	// Special case: "*" allows all origins (use with caution)
+	for _, allowed := range h.allowedOrigins {
+		if allowed == "*" {
+			return true
+		}
+	}
+
+	// Get the origin from the request
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		// No origin header, could be a non-browser client
+		// You may want to allow or deny based on your security requirements
+		return false
+	}
+
+	// Parse the origin URL
+	originURL, err := url.Parse(origin)
+	if err != nil {
+		log.Printf("Invalid origin URL: %s", origin)
+		return false
+	}
+
+	// Check if the origin matches any allowed origin
+	for _, allowed := range h.allowedOrigins {
+		allowedURL, err := url.Parse(allowed)
+		if err != nil {
+			// If allowed origin is not a valid URL, try direct string comparison
+			if strings.EqualFold(origin, allowed) {
+				return true
+			}
+			continue
+		}
+
+		// Compare scheme, host, and port
+		if originURL.Scheme == allowedURL.Scheme &&
+			strings.EqualFold(originURL.Host, allowedURL.Host) {
+			return true
+		}
+	}
+
+	log.Printf("Rejected WebSocket connection from origin: %s", origin)
+	return false
+}
+
+// SetConnectionLimits configures the maximum connection limits
+func (h *Hub) SetConnectionLimits(maxTotal, maxPerIP int) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.maxConnections = maxTotal
+	h.maxConnectionsPerIP = maxPerIP
+}
+
+// canAcceptConnection checks if a new connection from the given IP can be accepted
+func (h *Hub) canAcceptConnection(clientIP string) (bool, string) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	
+	// Check total connection limit
+	activeConnections := len(h.clients)
+	if activeConnections >= h.maxConnections {
+		return false, fmt.Sprintf("maximum connections reached (%d)", h.maxConnections)
+	}
+	
+	// Check per-IP connection limit
+	connectionsFromIP := h.clientsByIP[clientIP]
+	if connectionsFromIP >= h.maxConnectionsPerIP {
+		return false, fmt.Sprintf("maximum connections per IP reached (%d)", h.maxConnectionsPerIP)
+	}
+	
+	return true, ""
+}
+
+// registerClient registers a new client connection
+func (h *Hub) registerClient(client *Client, clientIP string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	
+	h.clients[client] = true
+	h.clientsByIP[clientIP]++
+	h.metrics.ActiveConnections++
+	h.metrics.TotalConnections++
+}
+
+// unregisterClient removes a client connection
+func (h *Hub) unregisterClient(client *Client, clientIP string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	
+	if _, ok := h.clients[client]; ok {
+		delete(h.clients, client)
+		close(client.Send)
+		
+		// Decrement per-IP counter
+		if count := h.clientsByIP[clientIP]; count > 0 {
+			if count == 1 {
+				delete(h.clientsByIP, clientIP)
+			} else {
+				h.clientsByIP[clientIP]--
+			}
+		}
+		
+		h.metrics.ActiveConnections--
+		h.metrics.DroppedConnections++
+	}
 }
 
 func (h *Hub) run() {
@@ -122,15 +249,8 @@ func (h *Hub) run() {
 			go h.streamTicksToClient(client)
 
 		case client := <-h.unregister:
-			h.mu.Lock()
-			if _, ok := h.clients[client]; ok {
-				delete(h.clients, client)
-				close(client.Send)
-				h.metrics.ActiveConnections--
-				h.metrics.DroppedConnections++
-			}
-			h.mu.Unlock()
-			
+			// Use the unregisterClient method to properly clean up
+			h.unregisterClient(client, client.ClientIP)
 			log.Printf("Client %s disconnected", client.ID)
 
 		case message := <-h.broadcast:
@@ -245,6 +365,17 @@ func (h *Hub) sendErrorToClient(client *Client, errorMsg string) {
 }
 
 func (h *Hub) HandleWebSocket(c *gin.Context) {
+	// Get client IP for connection tracking
+	clientIP := c.ClientIP()
+	
+	// Check connection limits before upgrading
+	canAccept, reason := h.canAcceptConnection(clientIP)
+	if !canAccept {
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": reason})
+		log.Printf("Rejected WebSocket connection from %s: %s", clientIP, reason)
+		return
+	}
+	
 	startTickStr := c.DefaultQuery("start_tick", "0")
 	startTick, err := strconv.ParseUint(startTickStr, 10, 64)
 	if err != nil {
@@ -252,7 +383,7 @@ func (h *Hub) HandleWebSocket(c *gin.Context) {
 		return
 	}
 
-	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+	conn, err := h.upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		log.Printf("WebSocket upgrade failed: %v", err)
 		return
@@ -264,14 +395,24 @@ func (h *Hub) HandleWebSocket(c *gin.Context) {
 		Hub:       h,
 		Send:      make(chan []byte, 256),
 		StartTick: startTick,
+		ClientIP:  clientIP,
 	}
 
-	// Register the client
-	h.register <- client
+	// Register the client with IP tracking
+	h.registerClient(client, clientIP)
+	log.Printf("WebSocket client %s connected from %s, starting from tick %d", client.ID, clientIP, client.StartTick)
+	
+	// Start streaming ticks for this client
+	go h.streamTicksToClient(client)
 
 	// Start goroutines to handle reading and writing
 	go client.writePump()
-	go client.readPump()
+	
+	// When readPump returns, unregister the client
+	go func() {
+		client.readPump()
+		h.unregisterClient(client, clientIP)
+	}()
 }
 
 func (c *Client) readPump() {

@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	apiErrors "github.com/zerooo111/tick-streamer/internal/api/errors"
 	"github.com/zerooo111/tick-streamer/internal/api/handlers"
 	"github.com/zerooo111/tick-streamer/internal/api/middleware"
 	"github.com/zerooo111/tick-streamer/internal/api/repository"
@@ -38,8 +39,8 @@ func NewServer(cfg *config.Config) (*Server, error) {
 		return nil, fmt.Errorf("failed to create handlers: %w", err)
 	}
 
-	// Create WebSocket hub
-	wsHub, err := websocket.NewHub(cfg.SequencerAddr)
+	// Create WebSocket hub with allowed origins from config
+	wsHub, err := websocket.NewHub(cfg.SequencerAddr, cfg.CORSAllowedOrigins)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create WebSocket hub: %w", err)
 	}
@@ -70,6 +71,12 @@ func (s *Server) setupMiddleware() {
 	// Recovery middleware (must be first)
 	s.router.Use(middleware.Recovery())
 
+	// Error handler middleware to catch panics and convert to proper error responses
+	s.router.Use(apiErrors.ErrorHandlerMiddleware())
+
+	// Global rate limiting (100 requests per second with burst of 200)
+	s.router.Use(middleware.GlobalRateLimiter(100, 200))
+
 	// CORS middleware
 	s.router.Use(middleware.CORS(s.config.CORSAllowedOrigins, s.config.CORSAllowCredentials))
 
@@ -80,11 +87,15 @@ func (s *Server) setupMiddleware() {
 }
 
 func (s *Server) setupRoutes() {
+	// Create per-endpoint rate limiter
+	endpointLimiter := middleware.CreateDefaultRateLimits()
+
 	// Root endpoint
 	s.router.GET("/", s.handler.Root)
 
-	// API v1 routes
+	// API v1 routes with per-endpoint rate limiting
 	v1 := s.router.Group("/api/v1")
+	v1.Use(endpointLimiter.Middleware())
 	{
 		// Health and status
 		v1.GET("/health", s.handler.Health)

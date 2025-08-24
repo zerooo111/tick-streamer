@@ -2,12 +2,14 @@ package middleware
 
 import (
 	"fmt"
+	"html"
 	"log"
 	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/gin-gonic/gin"
 )
@@ -126,10 +128,85 @@ func ValidateTickNumber(tickStr string) (uint64, error) {
 	return tickNum, nil
 }
 
+// Regular expressions for input validation
+var (
+	// Pattern for SQL injection attempts
+	sqlInjectionPattern = regexp.MustCompile(`(?i)(union|select|insert|update|delete|drop|create|alter|exec|execute|script|javascript|onload|onerror|onclick)`)
+	// Pattern for script tags and common XSS patterns
+	xssPattern = regexp.MustCompile(`(?i)(<script|<iframe|javascript:|on\w+=)`)
+	// Pattern for path traversal attempts
+	pathTraversalPattern = regexp.MustCompile(`\.\.[\\/]|\.\.\\|%2e%2e|%252e%252e`)
+)
+
 func SanitizeInput(input string) string {
-	// Remove any potentially dangerous characters for basic sanitization
-	// This is a simple implementation - expand as needed
-	return strings.TrimSpace(input)
+	// First, trim whitespace
+	input = strings.TrimSpace(input)
+	
+	// Check for empty input
+	if input == "" {
+		return ""
+	}
+	
+	// Limit input length to prevent buffer overflow attacks
+	const maxInputLength = 10000
+	if len(input) > maxInputLength {
+		input = input[:maxInputLength]
+	}
+	
+	// HTML escape to prevent XSS
+	input = html.EscapeString(input)
+	
+	// Remove or replace dangerous patterns
+	if sqlInjectionPattern.MatchString(input) {
+		log.Printf("Warning: Potential SQL injection attempt detected and sanitized")
+		input = sqlInjectionPattern.ReplaceAllString(input, "")
+	}
+	
+	if xssPattern.MatchString(input) {
+		log.Printf("Warning: Potential XSS attempt detected and sanitized")
+		input = xssPattern.ReplaceAllString(input, "")
+	}
+	
+	if pathTraversalPattern.MatchString(input) {
+		log.Printf("Warning: Potential path traversal attempt detected and sanitized")
+		input = pathTraversalPattern.ReplaceAllString(input, "")
+	}
+	
+	// Remove null bytes and other control characters
+	input = strings.Map(func(r rune) rune {
+		if r == 0 || (unicode.IsControl(r) && r != '\t' && r != '\n' && r != '\r') {
+			return -1 // Remove the character
+		}
+		return r
+	}, input)
+	
+	return input
+}
+
+// SanitizeURLParam sanitizes URL parameters specifically
+func SanitizeURLParam(param string) string {
+	// Apply general sanitization
+	param = SanitizeInput(param)
+	
+	// Additional URL-specific sanitization
+	// Remove any URL encoding that might hide malicious content
+	param = strings.ReplaceAll(param, "%00", "")
+	param = strings.ReplaceAll(param, "\x00", "")
+	
+	return param
+}
+
+// SanitizeJSON sanitizes JSON string values
+func SanitizeJSON(jsonStr string) string {
+	// Apply general sanitization
+	jsonStr = SanitizeInput(jsonStr)
+	
+	// Ensure the JSON doesn't contain script injections
+	// This is a basic check - for production, use a proper JSON validator
+	jsonStr = strings.ReplaceAll(jsonStr, "</script>", "")
+	jsonStr = strings.ReplaceAll(jsonStr, "<script>", "")
+	
+	return jsonStr
 }
 
 func ValidateQueryParams(c *gin.Context) []string {

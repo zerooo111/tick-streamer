@@ -11,6 +11,14 @@ import (
 	"github.com/zerooo111/tick-streamer/internal/sink"
 )
 
+// BatchItem wraps parsed data with retry metadata
+type BatchItem struct {
+	Data         *parser.ParsedData
+	RetryCount   int
+	FirstAttempt time.Time
+	LastAttempt  time.Time
+}
+
 // Batcher handles concurrent batching of parsed data
 // This demonstrates Go's concurrency patterns with channels and goroutines
 type Batcher struct {
@@ -26,7 +34,7 @@ type Batcher struct {
 	stopCh     chan struct{}           // Channel for shutdown signal
 	
 	// Current batch state
-	currentBatch []*parser.ParsedData
+	currentBatch []*BatchItem
 	batchTimer   *time.Timer
 	
 	// Concurrency control
@@ -38,6 +46,10 @@ type Batcher struct {
 	lastFailureTime     time.Time
 	circuitOpen         bool
 	circuitResetTime    time.Duration
+	
+	// Retry configuration
+	maxRetryAttempts    int
+	maxRetryAge         time.Duration
 	
 	// Statistics
 	stats BatchStats
@@ -63,8 +75,10 @@ func New(s sink.Sink, maxBatchSize int, maxWaitTime time.Duration) *Batcher {
 		dataCh:           make(chan *parser.ParsedData, maxBatchSize*2), // Buffer 2x batch size
 		flushCh:          make(chan chan error),
 		stopCh:           make(chan struct{}),
-		currentBatch:     make([]*parser.ParsedData, 0, maxBatchSize),
+		currentBatch:     make([]*BatchItem, 0, maxBatchSize),
 		circuitResetTime: 30 * time.Second, // Circuit breaker reset time
+		maxRetryAttempts: 3,                 // Maximum retry attempts per batch item
+		maxRetryAge:      5 * time.Minute,   // Drop items older than 5 minutes
 	}
 }
 
@@ -169,6 +183,65 @@ func (b *Batcher) Flush(ctx context.Context) error {
 	}
 }
 
+// filterRetryableItems filters items that can still be retried
+func (b *Batcher) filterRetryableItems(items []*BatchItem) []*BatchItem {
+	now := time.Now()
+	retryable := make([]*BatchItem, 0, len(items))
+	
+	for _, item := range items {
+		// Skip items that have exceeded retry limits
+		if item.RetryCount >= b.maxRetryAttempts {
+			log.Printf("⚠️ Dropping %s item after %d retry attempts", 
+				item.Data.Type, item.RetryCount)
+			continue
+		}
+		
+		// Skip items that are too old
+		if now.Sub(item.FirstAttempt) > b.maxRetryAge {
+			log.Printf("⚠️ Dropping %s item due to age (%.1f minutes old)",
+				item.Data.Type, now.Sub(item.FirstAttempt).Minutes())
+			continue
+		}
+		
+		retryable = append(retryable, item)
+	}
+	
+	return retryable
+}
+
+// prepareRetryBatch updates retry metadata for items being retried
+func (b *Batcher) prepareRetryBatch(items []*BatchItem) []*BatchItem {
+	now := time.Now()
+	retryBatch := make([]*BatchItem, 0, len(items))
+	
+	for _, item := range items {
+		// Skip items that shouldn't be retried
+		if item.RetryCount >= b.maxRetryAttempts {
+			log.Printf("⚠️ Dropping %s item after %d retry attempts",
+				item.Data.Type, item.RetryCount)
+			continue
+		}
+		
+		if now.Sub(item.FirstAttempt) > b.maxRetryAge {
+			log.Printf("⚠️ Dropping %s item due to age (%.1f minutes old)",
+				item.Data.Type, now.Sub(item.FirstAttempt).Minutes())
+			continue
+		}
+		
+		// Update retry metadata
+		item.RetryCount++
+		item.LastAttempt = now
+		retryBatch = append(retryBatch, item)
+	}
+	
+	if len(items) > len(retryBatch) {
+		log.Printf("📊 Retry batch: %d items dropped, %d items queued for retry",
+			len(items)-len(retryBatch), len(retryBatch))
+	}
+	
+	return retryBatch
+}
+
 // GetStats returns current batching statistics
 func (b *Batcher) GetStats() BatchStats {
 	b.stats.mu.RLock()
@@ -230,7 +303,14 @@ func (b *Batcher) addToBatch(data *parser.ParsedData) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	
-	b.currentBatch = append(b.currentBatch, data)
+	now := time.Now()
+	item := &BatchItem{
+		Data:         data,
+		RetryCount:   0,
+		FirstAttempt: now,
+		LastAttempt:  now,
+	}
+	b.currentBatch = append(b.currentBatch, item)
 	
 	// Update stats
 	b.stats.mu.Lock()
@@ -242,7 +322,7 @@ func (b *Batcher) addToBatch(data *parser.ParsedData) {
 func (b *Batcher) flushCurrentBatch(ctx context.Context, trigger string) error {
 	b.mu.Lock()
 	batchSize := len(b.currentBatch)
-	batch := make([]*parser.ParsedData, batchSize)
+	batch := make([]*BatchItem, batchSize)
 	copy(batch, b.currentBatch)
 	b.currentBatch = b.currentBatch[:0] // Reset slice but keep capacity
 	
@@ -250,9 +330,9 @@ func (b *Batcher) flushCurrentBatch(ctx context.Context, trigger string) error {
 	if b.circuitOpen {
 		if time.Since(b.lastFailureTime) < b.circuitResetTime {
 			b.mu.Unlock()
-			// Circuit still open - put data back
+			// Circuit still open - filter and retry eligible items
 			b.mu.Lock()
-			b.currentBatch = append(batch, b.currentBatch...)
+			b.currentBatch = b.filterRetryableItems(batch)
 			b.mu.Unlock()
 			return fmt.Errorf("circuit breaker open - rejecting batch")
 		} else {
@@ -273,8 +353,14 @@ func (b *Batcher) flushCurrentBatch(ctx context.Context, trigger string) error {
 	
 	start := time.Now()
 	
+	// Extract the actual data for persistence
+	dataToFlush := make([]*parser.ParsedData, 0, len(batch))
+	for _, item := range batch {
+		dataToFlush = append(dataToFlush, item.Data)
+	}
+	
 	// Send batch to sink
-	err := b.sink.PersistData(ctx, batch)
+	err := b.sink.PersistData(ctx, dataToFlush)
 	if err != nil {
 		log.Printf("❌ Batch flush failed: %v (batch_size=%d, trigger=%s)", 
 			err, batchSize, trigger)
@@ -282,9 +368,12 @@ func (b *Batcher) flushCurrentBatch(ctx context.Context, trigger string) error {
 		// Handle circuit breaker logic
 		b.handleFlushFailure()
 		
-		// Put data back in batch for retry (simple strategy)
+		// Update retry counts and filter items that should be retried
+		retryBatch := b.prepareRetryBatch(batch)
+		
+		// Put eligible items back for retry
 		b.mu.Lock()
-		b.currentBatch = append(batch, b.currentBatch...)
+		b.currentBatch = append(retryBatch, b.currentBatch...)
 		b.mu.Unlock()
 		
 		return err
@@ -309,7 +398,7 @@ func (b *Batcher) flushCurrentBatch(ctx context.Context, trigger string) error {
 	tickCount := 0
 	txCount := 0
 	for _, item := range batch {
-		switch item.Type {
+		switch item.Data.Type {
 		case "tick":
 			tickCount++
 		case "transaction":

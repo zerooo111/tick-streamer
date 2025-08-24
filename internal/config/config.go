@@ -14,9 +14,13 @@ import (
 // This struct uses Go's struct tags for documentation and validation
 type Config struct {
 	// Sequencer connection settings
-	SequencerAddr string `env:"SEQUENCER_ADDR"`
-	SequencerTLS  bool   `env:"SEQUENCER_TLS"`
-	SequencerMTLS bool   `env:"SEQUENCER_MTLS"`
+	SequencerAddr       string `env:"SEQUENCER_ADDR"`
+	SequencerTLS        bool   `env:"SEQUENCER_TLS"`
+	SequencerMTLS       bool   `env:"SEQUENCER_MTLS"`
+	SequencerServerName string `env:"SEQUENCER_SERVER_NAME"` // Server name for TLS verification
+	SequencerCACert     string `env:"SEQUENCER_CA_CERT"`     // Path to CA certificate
+	SequencerClientCert string `env:"SEQUENCER_CLIENT_CERT"` // Path to client certificate (for mTLS)
+	SequencerClientKey  string `env:"SEQUENCER_CLIENT_KEY"`  // Path to client key (for mTLS)
 
 	// Sink (database) settings
 	SinkKind string `env:"SINK_KIND"`
@@ -62,6 +66,10 @@ func Load() (*Config, error) {
 		SequencerAddr:        getRequiredEnvString("SEQUENCER_ADDR"),
 		SequencerTLS:         getEnvBool("SEQUENCER_TLS", false),
 		SequencerMTLS:        getEnvBool("SEQUENCER_MTLS", false),
+		SequencerServerName:  getEnvString("SEQUENCER_SERVER_NAME", ""),
+		SequencerCACert:      getEnvString("SEQUENCER_CA_CERT", ""),
+		SequencerClientCert:  getEnvString("SEQUENCER_CLIENT_CERT", ""),
+		SequencerClientKey:   getEnvString("SEQUENCER_CLIENT_KEY", ""),
 		SinkKind:             getRequiredEnvString("SINK_KIND"),
 		SinkDSN:              getEnvString("SINK_DSN", ""),
 		CheckpointDSN:        getRequiredEnvString("CHECKPOINT_DSN"),
@@ -85,6 +93,11 @@ func Load() (*Config, error) {
 	// Validate required configuration
 	if err := cfg.validate(); err != nil {
 		return nil, fmt.Errorf("configuration validation failed: %w", err)
+	}
+
+	// Validate TLS configuration
+	if err := cfg.validateTLS(); err != nil {
+		return nil, fmt.Errorf("TLS configuration validation failed: %w", err)
 	}
 
 	return cfg, nil
@@ -114,6 +127,44 @@ func (c *Config) validate() error {
 
 	if c.BatchRowsTick <= 0 {
 		return fmt.Errorf("BATCH_ROWS_TICK must be positive, got: %d", c.BatchRowsTick)
+	}
+
+	return nil
+}
+
+// validateTLS ensures TLS configuration is consistent and valid
+func (c *Config) validateTLS() error {
+	if c.SequencerTLS {
+		// When TLS is enabled, CA certificate is recommended for verification
+		if c.SequencerCACert == "" {
+			// Warning: using system CA bundle
+			fmt.Println("Warning: SEQUENCER_TLS is enabled but SEQUENCER_CA_CERT is not set. Using system CA bundle.")
+		} else {
+			// Validate CA cert file exists
+			if _, err := os.Stat(c.SequencerCACert); os.IsNotExist(err) {
+				return fmt.Errorf("CA certificate file not found: %s", c.SequencerCACert)
+			}
+		}
+	}
+
+	if c.SequencerMTLS {
+		// mTLS requires TLS to be enabled
+		if !c.SequencerTLS {
+			return fmt.Errorf("SEQUENCER_MTLS requires SEQUENCER_TLS to be enabled")
+		}
+
+		// mTLS requires client certificate and key
+		if c.SequencerClientCert == "" || c.SequencerClientKey == "" {
+			return fmt.Errorf("SEQUENCER_MTLS requires both SEQUENCER_CLIENT_CERT and SEQUENCER_CLIENT_KEY")
+		}
+
+		// Validate client cert and key files exist
+		if _, err := os.Stat(c.SequencerClientCert); os.IsNotExist(err) {
+			return fmt.Errorf("client certificate file not found: %s", c.SequencerClientCert)
+		}
+		if _, err := os.Stat(c.SequencerClientKey); os.IsNotExist(err) {
+			return fmt.Errorf("client key file not found: %s", c.SequencerClientKey)
+		}
 	}
 
 	return nil

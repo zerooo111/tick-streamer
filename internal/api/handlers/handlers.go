@@ -9,12 +9,14 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
+	apiErrors "github.com/zerooo111/tick-streamer/internal/api/errors"
 	"github.com/zerooo111/tick-streamer/internal/api/middleware"
 	"github.com/zerooo111/tick-streamer/internal/api/repository"
 	pb "github.com/zerooo111/tick-streamer/proto"
@@ -88,7 +90,7 @@ func (h *Handler) GetTransaction(c *gin.Context) {
 	txHash := middleware.SanitizeInput(c.Param("hash"))
 
 	if err := middleware.ValidateTransactionHash(txHash); err != nil {
-		middleware.SendErrorResponse(c, http.StatusBadRequest, "Invalid transaction hash", []string{err.Error()})
+		apiErrors.ValidationError(c, "Invalid transaction hash: " + err.Error())
 		return
 	}
 
@@ -107,24 +109,24 @@ func (h *Handler) GetTransaction(c *gin.Context) {
 	// Fallback to REST API
 	resp, err := h.makeSecureRequest("GET", h.restBaseURL+"/tx/"+txHash, nil)
 	if err != nil {
-		middleware.SendErrorResponse(c, http.StatusInternalServerError, "Failed to get transaction", nil)
+		apiErrors.ServiceUnavailableError(c, err)
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
-		middleware.SendErrorResponse(c, http.StatusNotFound, "Transaction not found", nil)
+		apiErrors.NotFoundError(c, "Transaction")
 		return
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		middleware.SendErrorResponse(c, http.StatusBadGateway, "Failed to get transaction", nil)
+		apiErrors.ServiceUnavailableError(c, fmt.Errorf("upstream returned status %d", resp.StatusCode))
 		return
 	}
 
 	var data interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		middleware.SendErrorResponse(c, http.StatusInternalServerError, "Failed to decode response", nil)
+		apiErrors.InternalError(c, err)
 		return
 	}
 
@@ -147,7 +149,7 @@ func (h *Handler) SubmitTransaction(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&body); err != nil {
-		middleware.SendErrorResponse(c, http.StatusBadRequest, "Invalid request body", []string{err.Error()})
+		apiErrors.BadRequestError(c, "Invalid request body: " + err.Error())
 		return
 	}
 
@@ -168,7 +170,7 @@ func (h *Handler) SubmitTransaction(c *gin.Context) {
 		Transaction: grpcTx,
 	})
 	if err != nil {
-		middleware.SendErrorResponse(c, http.StatusInternalServerError, "Failed to submit transaction", nil)
+		apiErrors.InternalError(c, fmt.Errorf("failed to submit transaction"))
 		return
 	}
 
@@ -189,7 +191,7 @@ func (h *Handler) SubmitBatch(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&body); err != nil {
-		middleware.SendErrorResponse(c, http.StatusBadRequest, "Invalid request body", []string{err.Error()})
+		apiErrors.BadRequestError(c, "Invalid request body: " + err.Error())
 		return
 	}
 
@@ -213,7 +215,7 @@ func (h *Handler) SubmitBatch(c *gin.Context) {
 		Transactions: grpcTxs,
 	})
 	if err != nil {
-		middleware.SendErrorResponse(c, http.StatusInternalServerError, "Failed to submit batch", nil)
+		apiErrors.InternalError(c, fmt.Errorf("failed to submit batch"))
 		return
 	}
 
@@ -226,7 +228,7 @@ func (h *Handler) GetTick(c *gin.Context) {
 
 	tickNumber, err := middleware.ValidateTickNumber(tickStr)
 	if err != nil {
-		middleware.SendErrorResponse(c, http.StatusBadRequest, "Invalid tick number", []string{err.Error()})
+		apiErrors.BadRequestError(c, "Invalid tick number: " + err.Error())
 		return
 	}
 
@@ -245,13 +247,13 @@ func (h *Handler) GetTick(c *gin.Context) {
 	// Fallback to REST API
 	resp, err := h.makeSecureRequest("GET", h.restBaseURL+"/tick/"+tickStr, nil)
 	if err != nil {
-		middleware.SendErrorResponse(c, http.StatusInternalServerError, "Failed to get tick", nil)
+		apiErrors.InternalError(c, fmt.Errorf("failed to get tick"))
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
-		middleware.SendErrorResponse(c, http.StatusNotFound, "Tick not found", nil)
+		apiErrors.NotFoundError(c, "Tick")
 		return
 	}
 
@@ -262,7 +264,7 @@ func (h *Handler) GetTick(c *gin.Context) {
 
 	var data interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		middleware.SendErrorResponse(c, http.StatusInternalServerError, "Failed to decode response", nil)
+		apiErrors.InternalError(c, err)
 		return
 	}
 
@@ -275,7 +277,7 @@ func (h *Handler) GetTick(c *gin.Context) {
 func (h *Handler) GetRecentTicks(c *gin.Context) {
 	validationErrors := middleware.ValidateQueryParams(c)
 	if len(validationErrors) > 0 {
-		middleware.SendErrorResponse(c, http.StatusBadRequest, "Invalid query parameters", validationErrors)
+		apiErrors.BadRequestError(c, "Invalid query parameters: " + strings.Join(validationErrors, ", "))
 		return
 	}
 
@@ -307,7 +309,7 @@ func (h *Handler) GetRecentTicks(c *gin.Context) {
 
 	resp, err := h.makeSecureRequest("GET", targetURL, nil)
 	if err != nil {
-		middleware.SendErrorResponse(c, http.StatusInternalServerError, "Failed to get recent ticks", nil)
+		apiErrors.InternalError(c, fmt.Errorf("failed to get recent ticks"))
 		return
 	}
 	defer resp.Body.Close()
@@ -319,7 +321,7 @@ func (h *Handler) GetRecentTicks(c *gin.Context) {
 
 	var data interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		middleware.SendErrorResponse(c, http.StatusInternalServerError, "Failed to decode response", nil)
+		apiErrors.InternalError(c, err)
 		return
 	}
 
@@ -336,7 +338,7 @@ func (h *Handler) GetChainState(c *gin.Context) {
 	if tickLimitStr != "" {
 		parsed, err := strconv.Atoi(tickLimitStr)
 		if err != nil || parsed < 0 {
-			middleware.SendErrorResponse(c, http.StatusBadRequest, "Invalid tick_limit parameter", nil)
+			apiErrors.BadRequestError(c, "Invalid tick_limit parameter")
 			return
 		}
 		tickLimit = &parsed
@@ -377,7 +379,7 @@ func (h *Handler) GetChainState(c *gin.Context) {
 func (h *Handler) GetMarkets(c *gin.Context) {
 	resp, err := h.makeSecureRequest("GET", h.matchEngineURL+"/markets", nil)
 	if err != nil {
-		middleware.SendErrorResponse(c, http.StatusInternalServerError, "Failed to get markets", nil)
+		apiErrors.InternalError(c, fmt.Errorf("failed to get markets"))
 		return
 	}
 	defer resp.Body.Close()
@@ -389,7 +391,7 @@ func (h *Handler) GetMarkets(c *gin.Context) {
 
 	var data interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		middleware.SendErrorResponse(c, http.StatusInternalServerError, "Failed to decode response", nil)
+		apiErrors.InternalError(c, err)
 		return
 	}
 
@@ -402,7 +404,7 @@ func (h *Handler) GetMarketOrderbook(c *gin.Context) {
 	marketID := middleware.SanitizeInput(c.Param("marketId"))
 
 	if marketID == "" {
-		middleware.SendErrorResponse(c, http.StatusBadRequest, "Market ID is required", nil)
+		apiErrors.BadRequestError(c, "Market ID is required")
 		return
 	}
 
@@ -410,13 +412,13 @@ func (h *Handler) GetMarketOrderbook(c *gin.Context) {
 
 	resp, err := h.makeSecureRequest("GET", targetURL, nil)
 	if err != nil {
-		middleware.SendErrorResponse(c, http.StatusInternalServerError, "Failed to get market orderbook", nil)
+		apiErrors.InternalError(c, fmt.Errorf("failed to get market orderbook"))
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
-		middleware.SendErrorResponse(c, http.StatusNotFound, "Market not found", nil)
+		apiErrors.NotFoundError(c, "Market")
 		return
 	}
 
@@ -427,7 +429,7 @@ func (h *Handler) GetMarketOrderbook(c *gin.Context) {
 
 	var data interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		middleware.SendErrorResponse(c, http.StatusInternalServerError, "Failed to decode response", nil)
+		apiErrors.InternalError(c, err)
 		return
 	}
 

@@ -2,13 +2,19 @@ package streamer
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"io"
 	"log"
+	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/zerooo111/tick-streamer/internal/batcher"
@@ -53,6 +59,10 @@ type Streamer struct {
 	lastProcessedTick uint64
 	startTime         time.Time
 	lastTickTime      time.Time
+	
+	// Goroutine tracking for checkpoint saves
+	checkpointWg      sync.WaitGroup
+	checkpointWorkers int32 // atomic counter for active checkpoint workers
 }
 
 // New creates a new Streamer instance with the given configuration
@@ -172,8 +182,24 @@ func (s *Streamer) Stop() {
 		}
 	}
 	
+	// Wait for all checkpoint goroutines to complete
+	log.Println("Waiting for checkpoint saves to complete...")
+	checkpointDone := make(chan struct{})
+	go func() {
+		s.checkpointWg.Wait()
+		close(checkpointDone)
+	}()
+	
+	select {
+	case <-checkpointDone:
+		log.Println("All checkpoint saves completed")
+	case <-time.After(10 * time.Second):
+		log.Printf("⚠️ Timeout waiting for checkpoint saves (%d still running)", atomic.LoadInt32(&s.checkpointWorkers))
+	}
+	
 	// Save final checkpoint before shutdown
 	if s.checkpoint != nil && s.lastProcessedTick > 0 {
+		log.Printf("Saving final checkpoint at tick %d...", s.lastProcessedTick)
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		
@@ -210,12 +236,18 @@ func (s *Streamer) connect(ctx context.Context) error {
 
 	// Configure TLS based on configuration
 	if s.config.SequencerTLS {
-		// TODO: Add proper TLS configuration in later phase
-		log.Println("TLS support will be added in a later phase")
+		tlsConfig, err := s.buildTLSConfig()
+		if err != nil {
+			return fmt.Errorf("failed to build TLS configuration: %w", err)
+		}
+		creds := credentials.NewTLS(tlsConfig)
+		opts = append(opts, grpc.WithTransportCredentials(creds))
+		log.Println("TLS enabled for gRPC connection")
+	} else {
+		// Use insecure credentials only when TLS is explicitly disabled
+		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		log.Println("Warning: Using insecure gRPC connection. Enable TLS in production!")
 	}
-	
-	// For now, use insecure credentials
-	opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
 
 	// Create connection
 	conn, err := grpc.NewClient(s.config.SequencerAddr, opts...)
@@ -228,6 +260,51 @@ func (s *Streamer) connect(ctx context.Context) error {
 
 	log.Println("Successfully connected to sequencer")
 	return nil
+}
+
+// buildTLSConfig creates TLS configuration based on config settings
+func (s *Streamer) buildTLSConfig() (*tls.Config, error) {
+	tlsConfig := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+	}
+
+	// Set server name for verification if provided
+	if s.config.SequencerServerName != "" {
+		tlsConfig.ServerName = s.config.SequencerServerName
+	}
+
+	// Load custom CA certificate if provided
+	if s.config.SequencerCACert != "" {
+		caCert, err := os.ReadFile(s.config.SequencerCACert)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read CA certificate: %w", err)
+		}
+
+		// Create or get system certificate pool
+		caCertPool, err := x509.SystemCertPool()
+		if err != nil {
+			// If system pool is not available, create a new one
+			caCertPool = x509.NewCertPool()
+		}
+
+		// Append our CA certificate
+		if !caCertPool.AppendCertsFromPEM(caCert) {
+			return nil, fmt.Errorf("failed to append CA certificate")
+		}
+		
+		tlsConfig.RootCAs = caCertPool
+	}
+
+	// Configure mutual TLS if enabled
+	if s.config.SequencerMTLS {
+		cert, err := tls.LoadX509KeyPair(s.config.SequencerClientCert, s.config.SequencerClientKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load client certificate: %w", err)
+		}
+		tlsConfig.Certificates = []tls.Certificate{cert}
+	}
+
+	return tlsConfig, nil
 }
 
 // streamLoopWithResilience handles the main streaming logic with resilience patterns
