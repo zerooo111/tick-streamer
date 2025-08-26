@@ -2,9 +2,7 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -29,21 +27,6 @@ func main() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	// Start HTTP server for health checks in a goroutine
-	httpServer := &http.Server{
-		Addr: cfg.HTTPBind,
-	}
-
-	// Register health check endpoint
-	http.HandleFunc("/health", healthHandler)
-
-	go func() {
-		log.Printf("Starting HTTP server on %s", cfg.HTTPBind)
-		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Printf("HTTP server error: %v", err)
-		}
-	}()
-
 	// Create and start the streamer
 	tickStreamer, err := streamer.New(cfg)
 	if err != nil {
@@ -60,7 +43,6 @@ func main() {
 
 	log.Println("Continuum Streamer started successfully")
 	log.Printf("Connecting to sequencer at: %s", cfg.SequencerAddr)
-	log.Printf("Health check available at: http://%s/health", cfg.HTTPBind)
 
 	// Wait for shutdown signal
 	<-sigChan
@@ -69,11 +51,6 @@ func main() {
 	// Create shutdown context with timeout
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
-
-	// Shutdown HTTP server
-	if err := httpServer.Shutdown(shutdownCtx); err != nil {
-		log.Printf("HTTP server shutdown error: %v", err)
-	}
 
 	// Cancel main context to stop streamer
 	cancel()
@@ -91,14 +68,4 @@ func main() {
 	case <-shutdownCtx.Done():
 		log.Println("Shutdown timeout exceeded, forcing exit")
 	}
-}
-
-// healthHandler handles the /health endpoint
-// This is a basic implementation - we'll enhance it later with actual health checks
-func healthHandler(w http.ResponseWriter, r *http.Request) {
-	// For now, always return healthy
-	// TODO: Check if streamer is connected and sink is available
-	w.Header().Set("Content-Type", "text/plain")
-	w.WriteHeader(http.StatusOK)
-	fmt.Fprintf(w, "OK\n")
 }

@@ -22,9 +22,12 @@ type Config struct {
 	SequencerClientCert string `env:"SEQUENCER_CLIENT_CERT"` // Path to client certificate (for mTLS)
 	SequencerClientKey  string `env:"SEQUENCER_CLIENT_KEY"`  // Path to client key (for mTLS)
 
-	// Sink (database) settings
-	SinkKind string `env:"SINK_KIND"`
-	SinkDSN  string `env:"SINK_DSN"`
+	// ClickHouse connection settings
+	ClickHouseHost     string `env:"CLICKHOUSE_HOST"`
+	ClickHousePort     int    `env:"CLICKHOUSE_PORT"`
+	ClickHouseDatabase string `env:"CLICKHOUSE_DATABASE"`
+	ClickHouseUsername string `env:"CLICKHOUSE_USERNAME"`
+	ClickHousePassword string `env:"CLICKHOUSE_PASSWORD"`
 
 	// Checkpoint persistence
 	CheckpointDSN string `env:"CHECKPOINT_DSN"`
@@ -38,9 +41,6 @@ type Config struct {
 	RetryBackoffMin time.Duration `env:"RETRY_BACKOFF_MIN_MS"`
 	RetryBackoffMax time.Duration `env:"RETRY_BACKOFF_MAX_MS"`
 
-	// HTTP server settings
-	HTTPBind string `env:"HTTP_BIND"`
-
 	// API server specific settings
 	APIPort              string   `env:"API_PORT"`
 	RestBaseURL          string   `env:"REST_BASE_URL"`
@@ -50,7 +50,13 @@ type Config struct {
 	Debug                bool     `env:"DEBUG"`
 
 	// Logging
-	LogLevel string `env:"LOG_LEVEL"`
+	LogLevel      string `env:"LOG_LEVEL"`
+	LogDir        string `env:"LOG_DIR"`
+	LogMaxSize    int    `env:"LOG_MAX_SIZE"`    // megabytes
+	LogMaxBackups int    `env:"LOG_MAX_BACKUPS"`
+	LogMaxAge     int    `env:"LOG_MAX_AGE"`     // days
+	LogCompress   bool   `env:"LOG_COMPRESS"`
+	LogConsole    bool   `env:"LOG_CONSOLE"`
 }
 
 // Load reads configuration from .env file and environment variables
@@ -70,16 +76,24 @@ func Load() (*Config, error) {
 		SequencerCACert:      getEnvString("SEQUENCER_CA_CERT", ""),
 		SequencerClientCert:  getEnvString("SEQUENCER_CLIENT_CERT", ""),
 		SequencerClientKey:   getEnvString("SEQUENCER_CLIENT_KEY", ""),
-		SinkKind:             getRequiredEnvString("SINK_KIND"),
-		SinkDSN:              getEnvString("SINK_DSN", ""),
+		ClickHouseHost:       getRequiredEnvString("CLICKHOUSE_HOST"),
+		ClickHousePort:       getEnvInt("CLICKHOUSE_PORT", 9440),
+		ClickHouseDatabase:   getEnvString("CLICKHOUSE_DATABASE", "default"),
+		ClickHouseUsername:   getEnvString("CLICKHOUSE_USERNAME", "default"),
+		ClickHousePassword:   getRequiredEnvString("CLICKHOUSE_PASSWORD"),
 		CheckpointDSN:        getRequiredEnvString("CHECKPOINT_DSN"),
 		BatchRowsTx:          getEnvInt("BATCH_ROWS_TX", 20000),
 		BatchRowsTick:        getEnvInt("BATCH_ROWS_TICK", 1000),
 		BatchMaxWaitTime:     getEnvDuration("BATCH_MAX_WAIT_MS", 100*time.Millisecond),
 		RetryBackoffMin:      getEnvDuration("RETRY_BACKOFF_MIN_MS", 200*time.Millisecond),
 		RetryBackoffMax:      getEnvDuration("RETRY_BACKOFF_MAX_MS", 20000*time.Millisecond),
-		HTTPBind:             getRequiredEnvString("HTTP_BIND"),
 		LogLevel:             getEnvString("LOG_LEVEL", "info"),
+		LogDir:               getEnvString("LOG_DIR", "./logs"),
+		LogMaxSize:           getEnvInt("LOG_MAX_SIZE", 100),      // 100MB default
+		LogMaxBackups:        getEnvInt("LOG_MAX_BACKUPS", 5),     // Keep 5 backups
+		LogMaxAge:            getEnvInt("LOG_MAX_AGE", 30),        // Keep logs for 30 days
+		LogCompress:          getEnvBool("LOG_COMPRESS", true),    // Compress old logs by default
+		LogConsole:           getEnvBool("LOG_CONSOLE", true),     // Also log to console by default
 		
 		// API server configuration - all required
 		APIPort:              getRequiredEnvString("API_PORT"),
@@ -109,16 +123,16 @@ func (c *Config) validate() error {
 		return fmt.Errorf("SEQUENCER_ADDR is required")
 	}
 
-	if c.SinkKind == "" {
-		return fmt.Errorf("SINK_KIND is required")
+	if c.ClickHouseHost == "" {
+		return fmt.Errorf("CLICKHOUSE_HOST is required")
 	}
 
-	// Validate sink kind is supported
-	switch c.SinkKind {
-	case "mock", "logfile", "log", "sqlite", "sqlite3", "clickhouse", "ch", "postgres":
-		// Valid sink types
-	default:
-		return fmt.Errorf("unsupported SINK_KIND: %s (must be one of: mock, logfile, log, sqlite, sqlite3, clickhouse, ch, postgres)", c.SinkKind)
+	if c.ClickHousePassword == "" {
+		return fmt.Errorf("CLICKHOUSE_PASSWORD is required")
+	}
+
+	if c.ClickHousePort <= 0 {
+		return fmt.Errorf("CLICKHOUSE_PORT must be positive, got: %d", c.ClickHousePort)
 	}
 
 	if c.BatchRowsTx <= 0 {

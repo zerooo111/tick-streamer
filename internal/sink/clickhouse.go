@@ -55,10 +55,15 @@ func NewClickHouseSink(cfg Config) (*ClickHouseSink, error) {
 	// Get ClickHouse configuration from environment variables
 	chConfig := getClickHouseConfigFromEnv()
 	
-	// Set defaults if not provided
+	// These are required - no defaults
 	if chConfig.Host == "" {
-		chConfig.Host = "z9jq89387u.ap-south-1.aws.clickhouse.cloud"
+		return nil, fmt.Errorf("CLICKHOUSE_HOST is required")
 	}
+	if chConfig.Password == "" {
+		return nil, fmt.Errorf("CLICKHOUSE_PASSWORD is required")
+	}
+	
+	// Set defaults for optional settings
 	if chConfig.Port == 0 {
 		chConfig.Port = 9440  // Secure native TCP port
 	}
@@ -67,9 +72,6 @@ func NewClickHouseSink(cfg Config) (*ClickHouseSink, error) {
 	}
 	if chConfig.Username == "" {
 		chConfig.Username = "default"
-	}
-	if chConfig.Password == "" {
-		chConfig.Password = "1O4~txzDw_LZl"  // Default password, should be overridden by env var
 	}
 	if chConfig.BatchSize == 0 {
 		chConfig.BatchSize = cfg.MaxBatchSize

@@ -235,9 +235,21 @@ func SendErrorResponse(c *gin.Context, statusCode int, message string, validatio
 		Timestamp: time.Now().Unix(),
 	}
 	
+	// Log error to console for development
 	log.Printf("❌ [%s %s] %d: %s", c.Request.Method, c.Request.URL.Path, statusCode, message)
 	if validationErrors != nil {
 		log.Printf("   Validation errors: %v", validationErrors)
+	}
+	
+	// Log to error file if logger exists in context
+	if logWriter, exists := c.Get("logWriter"); exists {
+		if lw, ok := logWriter.(*LogWriter); ok {
+			errorDetail := message
+			if validationErrors != nil {
+				errorDetail = fmt.Sprintf("%s - Validation errors: %v", message, validationErrors)
+			}
+			lw.LogError(c.Request.Method, c.Request.URL.Path, c.ClientIP(), c.Request.UserAgent(), errorDetail, statusCode)
+		}
 	}
 	
 	c.JSON(statusCode, response)

@@ -58,7 +58,7 @@ type ClickHouseRepository struct {
 }
 
 func NewClickHouseRepository(cfg *config.Config) (*ClickHouseRepository, error) {
-	// Get ClickHouse configuration from environment
+	// Get ClickHouse configuration from environment variables
 	host := getEnvOrDefault("CLICKHOUSE_HOST", "")
 	port := getEnvOrDefaultInt("CLICKHOUSE_PORT", 9440)
 	database := getEnvOrDefault("CLICKHOUSE_DATABASE", "default")
@@ -66,9 +66,12 @@ func NewClickHouseRepository(cfg *config.Config) (*ClickHouseRepository, error) 
 	password := getEnvOrDefault("CLICKHOUSE_PASSWORD", "")
 	
 	// Check if ClickHouse is configured
-	if host == "" || host == "your-clickhouse-host" {
+	if host == "" || password == "" {
+		fmt.Println("⚠️ ClickHouse not configured (missing CLICKHOUSE_HOST or CLICKHOUSE_PASSWORD), falling back to REST API only")
 		return &ClickHouseRepository{conn: nil}, nil // Return with nil connection
 	}
+	
+	fmt.Printf("🔗 Connecting to ClickHouse at %s:%d as %s\n", host, port, username)
 	
 	// Create ClickHouse connection
 	conn, err := clickhouse.Open(&clickhouse.Options{

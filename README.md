@@ -5,12 +5,14 @@ A high-performance, database-agnostic streaming data ingestor with a clean plugi
 ## 🚀 Quick Start
 
 ### Prerequisites
+
 - **Go 1.21+** installed
 - **Protocol Buffers compiler** (for development)
 
 ### Running the Streamer
 
 #### Option 1: Using Make Commands (Recommended)
+
 ```bash
 # See all available commands
 make help
@@ -31,6 +33,7 @@ make clean
 ```
 
 #### Option 2: Direct Go Commands
+
 ```bash
 # Run directly from source
 go run cmd/streamer/main.go
@@ -43,6 +46,7 @@ go build -o bin/streamer cmd/streamer/main.go
 ```
 
 #### Option 3: Install and Run
+
 ```bash
 # Install to $GOPATH/bin
 go install ./cmd/streamer
@@ -54,12 +58,14 @@ streamer
 ## 📊 What You'll See
 
 When running, the streamer will:
+
 1. **Connect** to the sequencer at `54.242.85.197:9090`
 2. **Stream ticks** in real-time with detailed logging
 3. **Provide metrics** showing throughput (ticks/second)
 4. **Serve health endpoint** at `http://localhost:8080/health`
 
 ### Sample Output
+
 ```
 2025/08/23 06:34:27 Continuum Streamer started successfully
 2025/08/23 06:34:27 Connecting to sequencer at: 54.242.85.197:9090
@@ -87,28 +93,28 @@ The streamer uses environment variables for configuration. See `.env.example` fo
 
 ### Key Environment Variables
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `SEQUENCER_ADDR` | `54.242.85.197:9090` | gRPC address of the sequencer service |
-| `HTTP_BIND` | `0.0.0.0:8080` | HTTP server bind address for health checks |
-| `SINK_KIND` | `mock` | Database sink type (`mock`, `postgres`, `clickhouse`) |
-| `LOG_LEVEL` | `info` | Logging level (`debug`, `info`, `warn`, `error`) |
-| `BATCH_ROWS_TX` | `20000` | Transaction batch size for database writes |
-| `BATCH_ROWS_TICK` | `1000` | Tick batch size for database writes |
+| Variable          | Default              | Description                                           |
+| ----------------- | -------------------- | ----------------------------------------------------- |
+| `SEQUENCER_ADDR`  | `54.242.85.197:9090` | gRPC address of the sequencer service                 |
+| `SINK_KIND`       | `mock`               | Database sink type (`mock`, `postgres`, `clickhouse`) |
+| `LOG_LEVEL`       | `info`               | Logging level (`debug`, `info`, `warn`, `error`)      |
+| `BATCH_ROWS_TX`   | `20000`              | Transaction batch size for database writes            |
+| `BATCH_ROWS_TICK` | `1000`               | Tick batch size for database writes                   |
 
 ### Using Environment Variables
 
 #### Option 1: Using make with environment variables
+
 ```bash
 # Set environment and run with make
 SEQUENCER_ADDR="your-sequencer:9090" make run
-HTTP_BIND="localhost:8080" make run
 
 # Multiple variables
-SEQUENCER_ADDR="localhost:9090" HTTP_BIND="127.0.0.1:3000" make run
+SEQUENCER_ADDR="localhost:9090"  make run
 ```
 
 #### Option 2: Use .env file
+
 ```bash
 # Copy example configuration
 cp .env.example .env
@@ -121,15 +127,16 @@ make run
 ```
 
 #### Option 3: Set in shell
+
 ```bash
 export SEQUENCER_ADDR="your-sequencer:9090"
-export HTTP_BIND="localhost:8080"
 make run
 ```
 
 #### Option 4: Direct Go commands with environment
+
 ```bash
-SEQUENCER_ADDR="localhost:9090" HTTP_BIND="127.0.0.1:3000" go run cmd/streamer/main.go
+SEQUENCER_ADDR="localhost:9090"  go run cmd/streamer/main.go
 ```
 
 ## 🔧 Available Commands
@@ -143,33 +150,33 @@ The project includes a `Makefile` with convenient commands:
 make help
 ```
 
-| Command | Description |
-|---------|-------------|
-| `make run` | Run the streamer from source |
-| `make build` | Build binary to `bin/streamer` |
-| `make install` | Install to system PATH |
-| `make clean` | Remove build artifacts |
-| `make test` | Run tests |
-| `make race` | Run with race detection |
-| `make health` | Check health endpoint |
-| `make proto` | Regenerate protobuf code |
-| `make proto-setup` | Install protobuf tools |
-| `make deps` | Update and verify dependencies |
-| `make fmt` | Format code |
-| `make lint` | Run linter |
+| Command            | Description                    |
+| ------------------ | ------------------------------ |
+| `make run`         | Run the streamer from source   |
+| `make build`       | Build binary to `bin/streamer` |
+| `make install`     | Install to system PATH         |
+| `make clean`       | Remove build artifacts         |
+| `make test`        | Run tests                      |
+| `make race`        | Run with race detection        |
+| `make health`      | Check health endpoint          |
+| `make proto`       | Regenerate protobuf code       |
+| `make proto-setup` | Install protobuf tools         |
+| `make deps`        | Update and verify dependencies |
+| `make fmt`         | Format code                    |
+| `make lint`        | Run linter                     |
 
 #### Make Examples
+
 ```bash
 # Development workflow
 make run                                    # Run from source
-make build                                 # Build binary  
+make build                                 # Build binary
 make health                               # Check if healthy
 
 # With environment variables
 SEQUENCER_ADDR=localhost:9090 make run    # Custom sequencer
-HTTP_BIND=127.0.0.1:3000 make run        # Custom port
 
-# Production workflow  
+# Production workflow
 make build                                # Build optimized binary
 ./bin/streamer                           # Run production binary
 
@@ -183,11 +190,13 @@ make deps                                # Update dependencies
 If you prefer using Go commands directly instead of Make:
 
 #### Run the application
+
 ```bash
 go run cmd/streamer/main.go
 ```
 
 #### Build binary
+
 ```bash
 # Build for current platform
 go build -o bin/streamer cmd/streamer/main.go
@@ -195,16 +204,18 @@ go build -o bin/streamer cmd/streamer/main.go
 # Build for Linux (cross-compile)
 GOOS=linux GOARCH=amd64 go build -o bin/streamer-linux cmd/streamer/main.go
 
-# Build for Windows (cross-compile)  
+# Build for Windows (cross-compile)
 GOOS=windows GOARCH=amd64 go build -o bin/streamer.exe cmd/streamer/main.go
 ```
 
 #### Install as system binary
+
 ```bash
 go install ./cmd/streamer
 ```
 
 #### Clean build artifacts
+
 ```bash
 rm -rf bin/
 go clean
@@ -226,16 +237,19 @@ protoc --go_out=. --go-grpc_out=. --go_opt=paths=source_relative --go-grpc_opt=p
 ### Testing Commands
 
 #### Run tests (when available)
+
 ```bash
 go test ./...
 ```
 
 #### Run with race detection
+
 ```bash
 go run -race cmd/streamer/main.go
 ```
 
 #### Check for dependencies
+
 ```bash
 go mod tidy
 go mod verify
@@ -260,9 +274,10 @@ curl http://localhost:8080/health
 The streamer supports graceful shutdown:
 
 - **Ctrl+C** (SIGINT) - Triggers graceful shutdown
-- **SIGTERM** - Also triggers graceful shutdown  
+- **SIGTERM** - Also triggers graceful shutdown
 
 During shutdown, the application will:
+
 1. Stop accepting new ticks
 2. Process any remaining ticks in the pipeline
 3. Save checkpoint data
@@ -272,6 +287,7 @@ During shutdown, the application will:
 ## 🏗️ Architecture
 
 **Clean Plugin-Based Design:**
+
 ```
 gRPC Stream → Streamer → Parser Plugin → Sink → Database
 ```
@@ -289,7 +305,7 @@ tick-streamer/
 ├── internal/
 │   ├── config/            # Configuration management
 │   ├── parser/            # Parser plugin interface & implementations
-│   ├── models/            # Data structure definitions  
+│   ├── models/            # Data structure definitions
 │   ├── streamer/          # Core gRPC streaming logic
 │   ├── sink/              # Database abstraction layer
 │   └── checkpoint/        # Checkpoint persistence
@@ -304,29 +320,38 @@ tick-streamer/
 ### Common Issues
 
 #### Connection refused to sequencer
+
 ```
 Error: failed to connect to sequencer: connection refused
 ```
+
 **Solution**: Verify the sequencer address and ensure it's accessible:
+
 ```bash
 # Test connection
 telnet 54.242.85.197 9090
 ```
 
 #### Port already in use
+
 ```
 Error: HTTP server error: listen tcp :8080: bind: address already in use
 ```
+
 **Solution**: Change the HTTP port:
+
 ```bash
-HTTP_BIND="0.0.0.0:3000" go run cmd/streamer/main.go
+go run cmd/streamer/main.go
 ```
 
 #### Permission denied on health endpoint
+
 ```
 Error: curl: (7) Failed to connect to localhost port 8080
 ```
+
 **Solution**: Check if the service is binding to the correct interface:
+
 ```bash
 # Try different addresses
 curl http://127.0.0.1:8080/health
@@ -374,19 +399,22 @@ grep "TICK #" logs/streamer.log | wc -l
 This project follows Go best practices with a clean plugin architecture:
 
 **Completed:**
+
 - ✅ **Phase 1**: Project structure and gRPC streaming
 - ✅ **Phase 2**: Parser plugin system and sink interface
 - ✅ **Clean Architecture**: Separated concerns with plugin-based data processing
 
 **Upcoming Phases:**
+
 - 📋 **Phase 3**: Concurrency and batching
-- 💾 **Phase 4**: Persistence and checkpoints  
+- 💾 **Phase 4**: Persistence and checkpoints
 - 🔄 **Phase 5**: Error handling and resilience
 - ⚙️ **Phase 6**: Advanced configuration
 - 🗄️ **Phase 7**: Database adapters
 - 📊 **Phase 8**: Observability and production features
 
 **Key Design Principles:**
+
 - **Single Responsibility**: Each component has one clear purpose
 - **Plugin Architecture**: Parsers and sinks are easily extensible
 - **Clean Interfaces**: Simple, focused method signatures

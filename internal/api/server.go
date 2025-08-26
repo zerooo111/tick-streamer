@@ -24,9 +24,25 @@ type Server struct {
 	wsHub      *websocket.Hub
 	config     *config.Config
 	repository *repository.ClickHouseRepository
+	logWriter  *middleware.LogWriter
 }
 
 func NewServer(cfg *config.Config) (*Server, error) {
+	// Create log writer with rotation
+	logConfig := &middleware.LogConfig{
+		LogDir:        cfg.LogDir,
+		MaxSize:       cfg.LogMaxSize,
+		MaxBackups:    cfg.LogMaxBackups,
+		MaxAge:        cfg.LogMaxAge,
+		Compress:      cfg.LogCompress,
+		EnableConsole: cfg.LogConsole,
+	}
+	
+	logWriter, err := middleware.NewLogWriter(logConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create log writer: %w", err)
+	}
+
 	// Create ClickHouse repository
 	repo, err := repository.NewClickHouseRepository(cfg)
 	if err != nil {
@@ -59,6 +75,7 @@ func NewServer(cfg *config.Config) (*Server, error) {
 		wsHub:      wsHub,
 		config:     cfg,
 		repository: repo,
+		logWriter:  logWriter,
 	}
 
 	s.setupMiddleware()
@@ -68,8 +85,17 @@ func NewServer(cfg *config.Config) (*Server, error) {
 }
 
 func (s *Server) setupMiddleware() {
-	// Recovery middleware (must be first)
-	s.router.Use(middleware.Recovery())
+	// Add log writer to context for error handling
+	s.router.Use(func(c *gin.Context) {
+		c.Set("logWriter", s.logWriter)
+		c.Next()
+	})
+
+	// Custom error recovery middleware (must be first)
+	s.router.Use(s.logWriter.ErrorLoggingMiddleware())
+
+	// Request logging middleware
+	s.router.Use(s.logWriter.LoggingMiddleware())
 
 	// Error handler middleware to catch panics and convert to proper error responses
 	s.router.Use(apiErrors.ErrorHandlerMiddleware())
@@ -79,11 +105,6 @@ func (s *Server) setupMiddleware() {
 
 	// CORS middleware
 	s.router.Use(middleware.CORS(s.config.CORSAllowedOrigins, s.config.CORSAllowCredentials))
-
-	// Logging middleware (only in debug mode)
-	if s.config.Debug {
-		s.router.Use(middleware.Logging())
-	}
 }
 
 func (s *Server) setupRoutes() {
@@ -181,6 +202,16 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		log.Println("🗄️ Closing ClickHouse repository...")
 		s.repository.Close()
 		log.Println("✅ ClickHouse repository closed")
+	}
+
+	// Close log writer
+	if s.logWriter != nil {
+		log.Println("📋 Closing log writer...")
+		if err := s.logWriter.Close(); err != nil {
+			log.Printf("❌ Error closing log writer: %v", err)
+		} else {
+			log.Println("✅ Log writer closed")
+		}
 	}
 
 	log.Println("🏁 Server stopped gracefully")

@@ -82,9 +82,9 @@ func New(cfg *config.Config) (*Streamer, error) {
 		return nil, fmt.Errorf("failed to create parser: %w", err)
 	}
 	
-	// Create sink based on configuration
+	// Create sink based on configuration (only ClickHouse supported)
 	sinkConfig := sink.Config{
-		Kind:         cfg.SinkKind,
+		Kind:         "clickhouse", // Only ClickHouse is supported
 		MaxBatchSize: cfg.BatchRowsTx, // Use transaction batch size as max
 	}
 	
