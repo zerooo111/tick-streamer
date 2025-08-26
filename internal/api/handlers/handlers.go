@@ -289,33 +289,18 @@ func (h *Handler) GetRecentTicks(c *gin.Context) {
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	// Try ClickHouse first
-	ticks, err := h.repository.GetRecentTicks(ctx, limit)
-	if err == nil {
-		c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
-		c.Header("X-Data-Source", "clickhouse")
-		c.JSON(http.StatusOK, ticks)
-		return
-	}
-
-	// Fallback to REST API
-	targetURL := h.restBaseURL + "/ticks/recent"
-	if c.Request.URL.RawQuery != "" {
-		targetURL += "?" + c.Request.URL.RawQuery
-	}
-
-	resp, err := h.makeSecureRequest("GET", targetURL, nil)
+	// Proxy to continuum REST API
+	continuumURL := fmt.Sprintf("%s/ticks/recent?limit=%d", h.restBaseURL, limit)
+	
+	resp, err := h.httpClient.Get(continuumURL)
 	if err != nil {
-		apiErrors.InternalError(c, fmt.Errorf("failed to get recent ticks"))
+		apiErrors.ServiceUnavailableError(c, fmt.Errorf("failed to get recent ticks from continuum"))
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		middleware.SendErrorResponse(c, http.StatusBadGateway, "Failed to get recent ticks", nil)
+		apiErrors.ServiceUnavailableError(c, fmt.Errorf("continuum service returned status %d", resp.StatusCode))
 		return
 	}
 
@@ -326,7 +311,7 @@ func (h *Handler) GetRecentTicks(c *gin.Context) {
 	}
 
 	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
-	c.Header("X-Data-Source", "rest-api")
+	c.Header("X-Data-Source", "continuum")
 	c.JSON(http.StatusOK, data)
 }
 

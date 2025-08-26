@@ -29,3 +29,34 @@ dist/
 
 # Docs not to track here
 help.md
+
+# Log files
+logs/
+*.log
+*.jsonl
+
+# Database files
+*.db
+checkpoint.db
+
+# Temporary files
+*.tmp
+*.temp
+*~
+*.bak
+
+# PM2 files
+.pm2/
+ecosystem.config.js
+
+# Coverage files
+coverage.txt
+coverage.html
+*.cover
+
+# Profiling files
+*.prof
+*.pprof
+
+# Binary output
+streamer
