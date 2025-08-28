@@ -185,25 +185,25 @@ func (r *ClickHouseRepository) GetTransaction(ctx context.Context, txHash string
 		return nil, fmt.Errorf("ClickHouse not available")
 	}
 	query := `
-		SELECT
-			tick_number,
-			sequence_number,
-			tx_hash,
-			tx_id,
-			nonce,
-			payload,
-			timestamp,
-			public_key,
-			signature,
-			ingestion_timestamp,
-			processed_at,
-			payload_size,
-			payload_type,
-			version
-		FROM transactions FINAL
-		WHERE tx_hash = $1 AND version > 0
-		ORDER BY version DESC
-		LIMIT 1
+    SELECT
+        tick_number,
+        sequence_number,
+        tx_hash,
+        tx_id,
+        nonce,
+        payload,
+        timestamp,
+        public_key,
+        signature,
+        ingestion_timestamp,
+        processed_at,
+        payload_size,
+        payload_type,
+        version
+    FROM transactions FINAL
+    WHERE LEFT(tx_hash, 8) = $1 AND version > 0
+    ORDER BY version DESC
+    LIMIT 1
 	`
 	
 	row := r.conn.QueryRow(ctx, query, txHash)
