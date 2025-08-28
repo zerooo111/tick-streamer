@@ -101,13 +101,6 @@ func ValidateTransactionHash(hash string) error {
 		return fmt.Errorf("transaction hash is required")
 	}
 	
-	// Check if it's a valid hex string (allow both with and without 0x prefix)
-	cleanHash := strings.TrimPrefix(hash, "0x")	
-	matched, _ := regexp.MatchString("^[0-9a-fA-F]{64}$", cleanHash)
-	if !matched {
-		return fmt.Errorf("transaction hash must be valid hex")
-	}
-	
 	return nil
 }
 
