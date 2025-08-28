@@ -3,6 +3,7 @@ package handlers
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -56,6 +57,44 @@ func (h *Handler) Close() {
 	if h.grpcConn != nil {
 		h.grpcConn.Close()
 	}
+}
+
+// TransactionRequest handles the JSON unmarshaling with proper type conversions
+type TransactionRequest struct {
+	TxID         string `json:"tx_id" binding:"required"`
+	Payload      []byte `json:"payload" binding:"required"`
+	SignatureHex string `json:"signature" binding:"required"`
+	PublicKeyB58 string `json:"public_key" binding:"required"`
+	Nonce        uint64 `json:"nonce" binding:"required"`
+	TimestampStr string `json:"timestamp" binding:"required"`
+}
+
+// ToProtobuf converts the request to a protobuf transaction
+func (tr *TransactionRequest) ToProtobuf() (*pb.Transaction, error) {
+	// Convert hex signature to bytes
+	signature, err := hex.DecodeString(tr.SignatureHex)
+	if err != nil {
+		return nil, fmt.Errorf("invalid signature hex: %w", err)
+	}
+
+	// Convert base58 public key to bytes (for now, treat as string bytes)
+	// TODO: Proper base58 decoding if needed
+	publicKey := []byte(tr.PublicKeyB58)
+
+	// Convert timestamp string to uint64
+	timestamp, err := strconv.ParseUint(tr.TimestampStr, 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("invalid timestamp: %w", err)
+	}
+
+	return &pb.Transaction{
+		TxId:      tr.TxID,
+		Payload:   tr.Payload,
+		Signature: signature,
+		PublicKey: publicKey,
+		Nonce:     tr.Nonce,
+		Timestamp: timestamp,
+	}, nil
 }
 
 // Health check endpoint
@@ -138,14 +177,7 @@ func (h *Handler) GetTransaction(c *gin.Context) {
 // Submit single transaction
 func (h *Handler) SubmitTransaction(c *gin.Context) {
 	var body struct {
-		Transaction struct {
-			TxID      string `json:"tx_id" binding:"required"`
-			Payload   []byte `json:"payload" binding:"required"`
-			Signature []byte `json:"signature" binding:"required"`
-			PublicKey []byte `json:"public_key" binding:"required"`
-			Nonce     uint64 `json:"nonce" binding:"required"`
-			Timestamp uint64 `json:"timestamp" binding:"required"`
-		} `json:"transaction" binding:"required"`
+		Transaction TransactionRequest `json:"transaction" binding:"required"`
 	}
 
 	if err := c.ShouldBindJSON(&body); err != nil {
@@ -154,13 +186,10 @@ func (h *Handler) SubmitTransaction(c *gin.Context) {
 	}
 
 	// Convert to gRPC transaction
-	grpcTx := &pb.Transaction{
-		TxId:      body.Transaction.TxID,
-		Payload:   body.Transaction.Payload,
-		Signature: body.Transaction.Signature,
-		PublicKey: body.Transaction.PublicKey,
-		Nonce:     body.Transaction.Nonce,
-		Timestamp: body.Transaction.Timestamp,
+	grpcTx, err := body.Transaction.ToProtobuf()
+	if err != nil {
+		apiErrors.BadRequestError(c, "Invalid transaction data: " + err.Error())
+		return
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -180,14 +209,7 @@ func (h *Handler) SubmitTransaction(c *gin.Context) {
 // Submit batch of transactions
 func (h *Handler) SubmitBatch(c *gin.Context) {
 	var body struct {
-		Transactions []struct {
-			TxID      string `json:"tx_id" binding:"required"`
-			Payload   []byte `json:"payload" binding:"required"`
-			Signature []byte `json:"signature" binding:"required"`
-			PublicKey []byte `json:"public_key" binding:"required"`
-			Nonce     uint64 `json:"nonce" binding:"required"`
-			Timestamp uint64 `json:"timestamp" binding:"required"`
-		} `json:"transactions" binding:"required,min=1"`
+		Transactions []TransactionRequest `json:"transactions" binding:"required,min=1"`
 	}
 
 	if err := c.ShouldBindJSON(&body); err != nil {
@@ -197,15 +219,13 @@ func (h *Handler) SubmitBatch(c *gin.Context) {
 
 	// Convert to gRPC transactions
 	var grpcTxs []*pb.Transaction
-	for _, tx := range body.Transactions {
-		grpcTxs = append(grpcTxs, &pb.Transaction{
-			TxId:      tx.TxID,
-			Payload:   tx.Payload,
-			Signature: tx.Signature,
-			PublicKey: tx.PublicKey,
-			Nonce:     tx.Nonce,
-			Timestamp: tx.Timestamp,
-		})
+	for i, tx := range body.Transactions {
+		grpcTx, err := tx.ToProtobuf()
+		if err != nil {
+			apiErrors.BadRequestError(c, fmt.Sprintf("Invalid transaction data at index %d: %s", i, err.Error()))
+			return
+		}
+		grpcTxs = append(grpcTxs, grpcTx)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
