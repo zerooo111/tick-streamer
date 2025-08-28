@@ -384,14 +384,18 @@ export BATCH_MAX_WAIT_MS=50
 ### Log Analysis
 
 ```bash
-# Monitor throughput
+# Monitor throughput (when LOG_FILE_DISABLE=false)
 tail -f logs/streamer.log | grep "ticks/sec"
 
-# Watch for errors
+# Watch for errors (when LOG_FILE_DISABLE=false)  
 tail -f logs/streamer.log | grep -i error
 
-# Count processed ticks
+# Count processed ticks (when LOG_FILE_DISABLE=false)
 grep "TICK #" logs/streamer.log | wc -l
+
+# With file logging disabled (LOG_FILE_DISABLE=true), monitor via stdout:
+# docker logs -f <container_name> | grep "ticks/sec"
+# docker logs -f <container_name> | grep -i error
 ```
 
 ## 🤝 Contributing

@@ -18,6 +18,7 @@ type LogConfig struct {
 	MaxAge         int  // days
 	Compress       bool
 	EnableConsole  bool
+	DisableFile    bool  // Disable file logging completely
 }
 
 type LogWriter struct {
@@ -27,25 +28,30 @@ type LogWriter struct {
 }
 
 func NewLogWriter(config *LogConfig) (*LogWriter, error) {
-	// Create log directory if it doesn't exist
-	if err := os.MkdirAll(config.LogDir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create log directory: %w", err)
-	}
+	var requestLogger, errorLogger *lumberjack.Logger
 
-	requestLogger := &lumberjack.Logger{
-		Filename:   filepath.Join(config.LogDir, "requests.log"),
-		MaxSize:    config.MaxSize,
-		MaxBackups: config.MaxBackups,
-		MaxAge:     config.MaxAge,
-		Compress:   config.Compress,
-	}
+	// Only create file loggers if file logging is not disabled
+	if !config.DisableFile {
+		// Create log directory if it doesn't exist
+		if err := os.MkdirAll(config.LogDir, 0755); err != nil {
+			return nil, fmt.Errorf("failed to create log directory: %w", err)
+		}
 
-	errorLogger := &lumberjack.Logger{
-		Filename:   filepath.Join(config.LogDir, "errors.log"),
-		MaxSize:    config.MaxSize,
-		MaxBackups: config.MaxBackups,
-		MaxAge:     config.MaxAge,
-		Compress:   config.Compress,
+		requestLogger = &lumberjack.Logger{
+			Filename:   filepath.Join(config.LogDir, "requests.log"),
+			MaxSize:    config.MaxSize,
+			MaxBackups: config.MaxBackups,
+			MaxAge:     config.MaxAge,
+			Compress:   config.Compress,
+		}
+
+		errorLogger = &lumberjack.Logger{
+			Filename:   filepath.Join(config.LogDir, "errors.log"),
+			MaxSize:    config.MaxSize,
+			MaxBackups: config.MaxBackups,
+			MaxAge:     config.MaxAge,
+			Compress:   config.Compress,
+		}
 	}
 
 	return &LogWriter{
@@ -57,15 +63,28 @@ func NewLogWriter(config *LogConfig) (*LogWriter, error) {
 
 func (lw *LogWriter) getWriter(isError bool) io.Writer {
 	var fileWriter io.Writer
-	if isError {
-		fileWriter = lw.errorLogger
-	} else {
-		fileWriter = lw.requestLogger
+	
+	// Only use file writers if file logging is enabled
+	if !lw.config.DisableFile {
+		if isError {
+			fileWriter = lw.errorLogger
+		} else {
+			fileWriter = lw.requestLogger
+		}
 	}
 
 	if lw.config.EnableConsole {
-		return io.MultiWriter(fileWriter, os.Stdout)
+		if fileWriter != nil {
+			return io.MultiWriter(fileWriter, os.Stdout)
+		}
+		return os.Stdout
 	}
+	
+	// If file logging is disabled and console is disabled, return stdout as fallback
+	if fileWriter == nil {
+		return os.Stdout
+	}
+	
 	return fileWriter
 }
 
@@ -128,15 +147,23 @@ func (lw *LogWriter) LogError(method, path, clientIP, userAgent, errorMsg string
 
 func (lw *LogWriter) Close() error {
 	var err error
-	if closeErr := lw.requestLogger.Close(); closeErr != nil {
-		err = closeErr
-	}
-	if closeErr := lw.errorLogger.Close(); closeErr != nil {
-		if err != nil {
-			err = fmt.Errorf("%v; %v", err, closeErr)
-		} else {
+	
+	// Only close file loggers if they exist
+	if lw.requestLogger != nil {
+		if closeErr := lw.requestLogger.Close(); closeErr != nil {
 			err = closeErr
 		}
 	}
+	
+	if lw.errorLogger != nil {
+		if closeErr := lw.errorLogger.Close(); closeErr != nil {
+			if err != nil {
+				err = fmt.Errorf("%v; %v", err, closeErr)
+			} else {
+				err = closeErr
+			}
+		}
+	}
+	
 	return err
 }

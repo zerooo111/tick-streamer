@@ -36,6 +36,7 @@ func NewServer(cfg *config.Config) (*Server, error) {
 		MaxAge:        cfg.LogMaxAge,
 		Compress:      cfg.LogCompress,
 		EnableConsole: cfg.LogConsole,
+		DisableFile:   cfg.LogFileDisable,
 	}
 	
 	logWriter, err := middleware.NewLogWriter(logConfig)

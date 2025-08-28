@@ -57,6 +57,7 @@ type Config struct {
 	LogMaxAge     int    `env:"LOG_MAX_AGE"`     // days
 	LogCompress   bool   `env:"LOG_COMPRESS"`
 	LogConsole    bool   `env:"LOG_CONSOLE"`
+	LogFileDisable bool   `env:"LOG_FILE_DISABLE"` // Disable file logging completely
 }
 
 // Load reads configuration from .env file and environment variables
@@ -94,6 +95,7 @@ func Load() (*Config, error) {
 		LogMaxAge:            getEnvInt("LOG_MAX_AGE", 30),        // Keep logs for 30 days
 		LogCompress:          getEnvBool("LOG_COMPRESS", true),    // Compress old logs by default
 		LogConsole:           getEnvBool("LOG_CONSOLE", true),     // Also log to console by default
+		LogFileDisable:       getEnvBool("LOG_FILE_DISABLE", false), // File logging enabled by default
 		
 		// API server configuration - all required
 		APIPort:              getRequiredEnvString("API_PORT"),

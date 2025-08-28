@@ -22,7 +22,7 @@ help:
 	@echo "  make proto          - Regenerate protobuf code"
 	@echo ""
 	@echo "Logs:"
-	@echo "  make logs           - Watch log files in real-time"
+	@echo "  make logs           - Watch log files (or stdout if file logging disabled)"
 	@echo ""
 	@echo "Examples:"
 	@echo "  make setup-env && vim .env    # Setup and configure environment"
@@ -49,14 +49,17 @@ run-api-server:
 	fi
 	go run cmd/api-server/main.go
 
-# Watch log files in real-time
+# Watch log files in real-time (or suggest stdout monitoring if disabled)
 logs:
-	@echo "👀 Watching log files in real-time..."
-	@echo "Press Ctrl+C to stop"
+	@echo "👀 Checking for log files..."
 	@if [ -d "logs" ]; then \
-		tail -f logs/*.log logs/*.jsonl 2>/dev/null || echo "No log files found in ./logs/"; \
+		tail -f logs/*.log logs/*.jsonl 2>/dev/null || echo "No log files found in ./logs/ (file logging is disabled by default)"; \
 	else \
-		echo "❌ logs/ directory not found. Run 'make run-streamer' first."; \
+		echo "📋 File logging is disabled by default (LOG_FILE_DISABLE=true)"; \
+		echo "💡 To monitor logs, use:"; \
+		echo "   make run-streamer | grep 'pattern'"; \
+		echo "   make run-api-server | grep 'error'"; \
+		echo "💡 To enable file logging, set LOG_FILE_DISABLE=false in .env"; \
 	fi
 
 # Build binaries
