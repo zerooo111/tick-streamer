@@ -141,7 +141,10 @@ func (h *Handler) GetTransaction(c *gin.Context) {
 	if err == nil {
 		c.Header("Cache-Control", "private, max-age=1800")
 		c.Header("X-Data-Source", "clickhouse")
-		c.JSON(http.StatusOK, tx)
+		c.JSON(http.StatusOK, gin.H{
+			"source": "db",
+			"data":   tx,
+		})
 		return
 	}
 
@@ -171,7 +174,10 @@ func (h *Handler) GetTransaction(c *gin.Context) {
 
 	c.Header("Cache-Control", "private, max-age=1800")
 	c.Header("X-Data-Source", "rest-api")
-	c.JSON(http.StatusOK, data)
+	c.JSON(http.StatusOK, gin.H{
+		"source": "continuum",
+		"data":   data,
+	})
 }
 
 // Submit single transaction
@@ -260,7 +266,10 @@ func (h *Handler) GetTick(c *gin.Context) {
 	if err == nil {
 		c.Header("Cache-Control", "private, max-age=600")
 		c.Header("X-Data-Source", "clickhouse")
-		c.JSON(http.StatusOK, tick)
+		c.JSON(http.StatusOK, gin.H{
+			"source": "db",
+			"data":   tick,
+		})
 		return
 	}
 
@@ -290,7 +299,10 @@ func (h *Handler) GetTick(c *gin.Context) {
 
 	c.Header("Cache-Control", "private, max-age=600")
 	c.Header("X-Data-Source", "rest-api")
-	c.JSON(http.StatusOK, data)
+	c.JSON(http.StatusOK, gin.H{
+		"source": "continuum",
+		"data":   data,
+	})
 }
 
 // Get recent ticks
@@ -332,6 +344,63 @@ func (h *Handler) GetRecentTicks(c *gin.Context) {
 
 	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
 	c.Header("X-Data-Source", "continuum")
+	c.JSON(http.StatusOK, data)
+}
+
+// Get recent transactions
+func (h *Handler) GetRecentTransactions(c *gin.Context) {
+	validationErrors := middleware.ValidateQueryParams(c)
+	if len(validationErrors) > 0 {
+		apiErrors.BadRequestError(c, "Invalid query parameters: " + strings.Join(validationErrors, ", "))
+		return
+	}
+
+	// Get limit parameter
+	limit := 50 // default
+	if limitStr := c.Query("limit"); limitStr != "" {
+		if parsedLimit, err := strconv.Atoi(limitStr); err == nil && parsedLimit > 0 && parsedLimit <= 1000 {
+			limit = parsedLimit
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Try ClickHouse first
+	transactions, err := h.repository.GetRecentTransactions(ctx, limit)
+	if err == nil {
+		c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+		c.Header("X-Data-Source", "clickhouse")
+		c.JSON(http.StatusOK, gin.H{
+			"transactions": transactions,
+			"count":        len(transactions),
+		})
+		return
+	}
+
+	// Fallback to REST API
+	continuumURL := fmt.Sprintf("%s/transactions/recent?limit=%d", h.restBaseURL, limit)
+	
+	resp, err := h.httpClient.Get(continuumURL)
+	if err != nil {
+		apiErrors.ServiceUnavailableError(c, fmt.Errorf("failed to get recent transactions"))
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		apiErrors.ServiceUnavailableError(c, fmt.Errorf("upstream service returned status %d", resp.StatusCode))
+		return
+	}
+
+	var data interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		apiErrors.InternalError(c, err)
+		return
+	}
+
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.Header("X-Data-Source", "rest-api")
 	c.JSON(http.StatusOK, data)
 }
 
@@ -451,6 +520,7 @@ func (h *Handler) Root(c *gin.Context) {
 			"health":           "/api/v1/health",
 			"status":           "/api/v1/status",
 			"transaction":      "/api/v1/tx/{hash}",
+			"recent_transactions": "/api/v1/tx/recent",
 			"submit_transaction": "/api/v1/tx",
 			"submit_batch":     "/api/v1/tx/batch",
 			"tick":             "/api/v1/tick/{number}",

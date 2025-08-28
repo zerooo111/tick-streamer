@@ -301,6 +301,75 @@ func (r *ClickHouseRepository) GetRecentTicks(ctx context.Context, limit int) ([
 	return ticks, nil
 }
 
+func (r *ClickHouseRepository) GetRecentTransactions(ctx context.Context, limit int) ([]TransactionData, error) {
+	if r.conn == nil {
+		return nil, fmt.Errorf("ClickHouse not available")
+	}
+	
+	if limit <= 0 || limit > 1000 {
+		limit = 50
+	}
+	
+	query := `
+		SELECT
+			tick_number,
+			sequence_number,
+			tx_hash,
+			tx_id,
+			nonce,
+			payload,
+			timestamp,
+			public_key,
+			signature,
+			ingestion_timestamp,
+			processed_at,
+			payload_size,
+			payload_type,
+			version
+		FROM transactions FINAL
+		WHERE version > 0
+		ORDER BY tick_number DESC, sequence_number DESC
+		LIMIT $1
+	`
+	
+	rows, err := r.conn.Query(ctx, query, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query recent transactions: %w", err)
+	}
+	defer rows.Close()
+
+	var transactions []TransactionData
+	for rows.Next() {
+		var tx TransactionData
+		err := rows.Scan(
+			&tx.TickNumber,
+			&tx.SequenceNumber,
+			&tx.TxHash,
+			&tx.TxID,
+			&tx.Nonce,
+			&tx.Payload,
+			&tx.Timestamp,
+			&tx.PublicKey,
+			&tx.Signature,
+			&tx.IngestionTimestamp,
+			&tx.ProcessedAt,
+			&tx.PayloadSize,
+			&tx.PayloadType,
+			&tx.Version,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan transaction row: %w", err)
+		}
+		transactions = append(transactions, tx)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating rows: %w", err)
+	}
+
+	return transactions, nil
+}
+
 func (r *ClickHouseRepository) GetChainState(ctx context.Context, tickLimit *int) (*ChainStateData, error) {
 	if r.conn == nil {
 		return nil, fmt.Errorf("ClickHouse not available")

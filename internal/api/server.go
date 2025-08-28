@@ -124,6 +124,7 @@ func (s *Server) setupRoutes() {
 
 		// Transaction routes
 		v1.GET("/tx/:hash", s.handler.GetTransaction)
+		v1.GET("/tx/recent", s.handler.GetRecentTransactions)
 		v1.POST("/tx", middleware.RequestSizeLimit(), s.handler.SubmitTransaction)
 		v1.POST("/tx/batch", middleware.RequestSizeLimit(), s.handler.SubmitBatch)
 
