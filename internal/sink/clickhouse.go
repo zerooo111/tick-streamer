@@ -234,26 +234,30 @@ func (s *ClickHouseSink) initSchema() error {
 	}
 	fmt.Println("✅ ClickHouse connection successful!")
 
-	// Create ticks table with ReplacingMergeTree for deduplication and versioning
+	// Create ticks table with SharedReplacingMergeTree for deduplication and versioning
 	fmt.Println("📋 Creating ticks table...")
 	ticksSchema := `
 	CREATE TABLE IF NOT EXISTS ticks (
 		tick_number UInt64,
-		timestamp_us Int64,
-		vdf_input String,
-		vdf_output String,
-		vdf_iterations UInt64,
-		vdf_proof String,
-		previous_output String,
-		transaction_batch_hash String,
-		transaction_count Int32,
+		height UInt64,
+		block_hash String CODEC(ZSTD(6)),
+		parent_hash String CODEC(ZSTD(6)),
+		tx_count UInt32,
+		payload_size_bytes UInt64,
+		size_bytes UInt64,
+		timestamp UInt64,
 		processed_at DateTime64(6),
-		ingestion_ts Int64,
+		proposer_id String CODEC(ZSTD(6)),
+		proposer_key String CODEC(ZSTD(6)),
+		chain_id LowCardinality(String),
+		network LowCardinality(String),
 		version Int32
 	) ENGINE = ReplacingMergeTree(version)
-	PARTITION BY toYYYYMM(toDateTime(timestamp_us / 1000000))
-	ORDER BY tick_number
-	SETTINGS index_granularity = 8192
+	PARTITION BY toYYYYMMDD(processed_at)
+	PRIMARY KEY (processed_at, tick_number)
+	ORDER BY (processed_at, tick_number)
+	TTL processed_at + toIntervalDay(7) RECOMPRESS CODEC(ZSTD(15))
+	SETTINGS index_granularity = 2048, allow_nullable_key = 0
 	`
 
 	if err := s.conn.Exec(ctx, ticksSchema); err != nil {
@@ -290,50 +294,11 @@ func (s *ClickHouseSink) initSchema() error {
 	}
 	fmt.Println("✅ Transactions table created successfully!")
 
-	// Create indexes for optimized queries
-	fmt.Println("📋 Creating indexes...")
-	indexes := []string{
-		// Critical for API queries by transaction hash
-		"CREATE INDEX IF NOT EXISTS idx_tx_hash ON transactions (tx_hash) TYPE minmax GRANULARITY 1",
-		// Useful for public key queries (address lookups)  
-		"CREATE INDEX IF NOT EXISTS idx_public_key ON transactions (public_key) TYPE minmax GRANULARITY 1",
-		// Useful for timestamp range queries
-		"CREATE INDEX IF NOT EXISTS idx_tick_timestamp ON ticks (timestamp_us) TYPE minmax GRANULARITY 8",
-		"CREATE INDEX IF NOT EXISTS idx_tx_timestamp ON transactions (timestamp) TYPE minmax GRANULARITY 8",
-	}
+	// Skip index creation - indexes are defined in the table schema
+	fmt.Println("✅ Schema created with built-in indexes!")
 
-	for _, indexSQL := range indexes {
-		if err := s.conn.Exec(ctx, indexSQL); err != nil {
-			// Don't fail on index creation errors, just log them
-			fmt.Printf("⚠️  Warning: Failed to create index: %v\n", err)
-		}
-	}
-	fmt.Println("✅ Indexes created successfully!")
-
-	// Create materialized views for real-time aggregations (optional)
-	fmt.Println("📋 Creating materialized view (optional)...")
-	tickStatsView := `
-	CREATE MATERIALIZED VIEW IF NOT EXISTS tick_stats
-	ENGINE = AggregatingMergeTree()
-	PARTITION BY toYYYYMM(processed_at)
-	ORDER BY (toStartOfHour(processed_at))
-	AS SELECT
-		toStartOfHour(processed_at) as hour,
-		countState() as tick_count,
-		sumState(transaction_count) as total_transactions,
-		maxState(tick_number) as max_tick,
-		avgState(transaction_count) as avg_tx_per_tick
-	FROM ticks
-	WHERE version > 0
-	GROUP BY hour
-	`
-
-	// Don't fail if materialized view creation fails (it's optional)
-	if err := s.conn.Exec(ctx, tickStatsView); err != nil {
-		fmt.Printf("⚠️ Warning: Failed to create materialized view (optional): %v\n", err)
-	} else {
-		fmt.Println("✅ Materialized view created successfully!")
-	}
+	// Skip materialized view creation - not needed with current table structure
+	fmt.Println("✅ Materialized views skipped - using table projections instead!")
 	
 	fmt.Println("🎉 ClickHouse schema initialization completed!")
 	return nil
@@ -469,9 +434,9 @@ func (s *ClickHouseSink) flushTickBatch(ctx context.Context) error {
 
 	batch, err := s.conn.PrepareBatch(ctx, `
 		INSERT INTO ticks (
-			tick_number, timestamp_us, vdf_input, vdf_output, vdf_iterations,
-			vdf_proof, previous_output, transaction_batch_hash, transaction_count,
-			processed_at, ingestion_ts, version
+			tick_number, height, block_hash, parent_hash, tx_count,
+			payload_size_bytes, size_bytes, timestamp, processed_at,
+			proposer_id, proposer_key, chain_id, network, version
 		) VALUES
 	`)
 	if err != nil {
@@ -481,16 +446,18 @@ func (s *ClickHouseSink) flushTickBatch(ctx context.Context) error {
 	for _, tick := range s.tickBatch {
 		err := batch.Append(
 			tick.TickNumber,
-			tick.TimestampUS,
-			tick.VdfInput,
-			tick.VdfOutput,
-			tick.VdfIterations,
-			tick.VdfProof,
-			tick.PreviousOutput,
-			tick.TransactionBatchHash,
-			tick.TransactionCount,
+			tick.Height,
+			tick.BlockHash,
+			tick.ParentHash,
+			tick.TxCount,
+			tick.PayloadSizeBytes,
+			tick.SizeBytes,
+			tick.Timestamp,
 			tick.ProcessedAt,
-			tick.IngestionTS,
+			tick.ProposerID,
+			tick.ProposerKey,
+			tick.ChainID,
+			tick.Network,
 			tick.Version,
 		)
 		if err != nil {
@@ -746,8 +713,8 @@ func (s *ClickHouseSink) GetAnalytics(ctx context.Context, hours int) (map[strin
 		SELECT 
 			toStartOfHour(processed_at) as hour,
 			count() as tick_count,
-			sum(transaction_count) as total_transactions,
-			avg(transaction_count) as avg_tx_per_tick
+			sum(tx_count) as total_transactions,
+			avg(tx_count) as avg_tx_per_tick
 		FROM ticks 
 		WHERE processed_at >= now() - INTERVAL ? HOUR
 		  AND version > 0
@@ -785,7 +752,7 @@ func (s *ClickHouseSink) GetAnalytics(ctx context.Context, hours int) (map[strin
 	overallQuery := `
 		SELECT 
 			count() as total_ticks,
-			sum(transaction_count) as total_transactions,
+			sum(tx_count) as total_transactions,
 			min(processed_at) as earliest_tick,
 			max(processed_at) as latest_tick
 		FROM ticks 

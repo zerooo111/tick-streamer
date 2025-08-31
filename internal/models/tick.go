@@ -9,30 +9,32 @@ import (
 // TickRow represents a tick record optimized for database storage
 // This demonstrates Go struct tags for JSON serialization and database mapping
 type TickRow struct {
-	// Primary identifier
+	// Primary identifiers
 	TickNumber uint64 `json:"tick_number" db:"tick_number"`
+	Height     uint64 `json:"height" db:"height"`
 	
-	// Timestamps - stored as Unix microseconds for precision
-	TimestampUS int64 `json:"timestamp_us" db:"timestamp_us"`
+	// Block identifiers
+	BlockHash  string `json:"block_hash" db:"block_hash"`
+	ParentHash string `json:"parent_hash" db:"parent_hash"`
 	
-	// VDF (Verifiable Delay Function) proof data
-	VdfInput      string `json:"vdf_input" db:"vdf_input"`
-	VdfOutput     string `json:"vdf_output" db:"vdf_output"`
-	VdfIterations uint64 `json:"vdf_iterations" db:"vdf_iterations"`
-	VdfProof      string `json:"vdf_proof" db:"vdf_proof"`
-	
-	// Blockchain state
-	PreviousOutput       string `json:"previous_output" db:"previous_output"`
-	TransactionBatchHash string `json:"transaction_batch_hash" db:"transaction_batch_hash"`
-	
-	// Metrics
-	TransactionCount int32 `json:"transaction_count" db:"transaction_count"`
+	// Block metrics
+	TxCount          uint32 `json:"tx_count" db:"tx_count"`
+	PayloadSizeBytes uint64 `json:"payload_size_bytes" db:"payload_size_bytes"`
+	SizeBytes        uint64 `json:"size_bytes" db:"size_bytes"`
+	Timestamp        uint64 `json:"timestamp" db:"timestamp"`
 	
 	// Processing metadata
-	ProcessedAt  time.Time `json:"processed_at" db:"processed_at"`
-	IngestionTS  int64     `json:"ingestion_ts" db:"ingestion_ts"`
+	ProcessedAt time.Time `json:"processed_at" db:"processed_at"`
 	
-	// Versioning for reorg handling (Phase 5)
+	// Block proposer information
+	ProposerID  string `json:"proposer_id" db:"proposer_id"`
+	ProposerKey string `json:"proposer_key" db:"proposer_key"`
+	
+	// Network information
+	ChainID string `json:"chain_id" db:"chain_id"`
+	Network string `json:"network" db:"network"`
+	
+	// Versioning for reorg handling
 	Version int32 `json:"version" db:"version"`
 }
 
@@ -40,22 +42,20 @@ type TickRow struct {
 // This teaches Go type conversion and struct initialization patterns
 func NewTickRow(pbTick *pb.Tick) *TickRow {
 	row := &TickRow{
-		TickNumber:           pbTick.TickNumber,
-		TimestampUS:          int64(pbTick.Timestamp),
-		PreviousOutput:       pbTick.PreviousOutput,
-		TransactionBatchHash: pbTick.TransactionBatchHash,
-		TransactionCount:     int32(len(pbTick.Transactions)),
-		ProcessedAt:          time.Now(),
-		IngestionTS:          time.Now().UnixMicro(),
-		Version:              1, // Default version for new records
-	}
-	
-	// Handle VDF proof if present
-	if pbTick.VdfProof != nil {
-		row.VdfInput = pbTick.VdfProof.Input
-		row.VdfOutput = pbTick.VdfProof.Output
-		row.VdfIterations = pbTick.VdfProof.Iterations
-		row.VdfProof = pbTick.VdfProof.Proof
+		TickNumber:       pbTick.TickNumber,
+		Height:           pbTick.TickNumber, // Use tick_number as height for now
+		BlockHash:        pbTick.TransactionBatchHash, // Use transaction batch hash as block hash
+		ParentHash:       pbTick.PreviousOutput,
+		TxCount:          uint32(len(pbTick.Transactions)),
+		PayloadSizeBytes: 0, // Calculate from transactions if needed
+		SizeBytes:        0, // Calculate total size if needed
+		Timestamp:        pbTick.Timestamp,
+		ProcessedAt:      time.Now(),
+		ProposerID:       "", // Set if available in protobuf
+		ProposerKey:      "", // Set if available in protobuf
+		ChainID:          "mainnet", // Default chain ID
+		Network:          "qubic", // Default network
+		Version:          1, // Default version for new records
 	}
 	
 	return row
@@ -64,15 +64,15 @@ func NewTickRow(pbTick *pb.Tick) *TickRow {
 // GetHumanTime returns the tick timestamp as a human-readable time
 // This demonstrates Go method definition on structs
 func (t *TickRow) GetHumanTime() time.Time {
-	return time.UnixMicro(t.TimestampUS)
+	return time.UnixMicro(int64(t.Timestamp))
 }
 
 // IsValid performs basic validation on the tick data
 // This teaches Go validation patterns and error handling
 func (t *TickRow) IsValid() bool {
 	return t.TickNumber > 0 && 
-		   t.TimestampUS > 0 && 
-		   t.TransactionBatchHash != ""
+		   t.Timestamp > 0 && 
+		   t.BlockHash != ""
 }
 
 // TableName returns the database table name for this model

@@ -14,19 +14,21 @@ import (
 )
 
 type TickData struct {
-	TickNumber            uint64    `json:"tick_number" ch:"tick_number"`
-	TimestampUS           int64     `json:"timestamp_us" ch:"timestamp_us"`
-	VDFInput             string    `json:"vdf_input" ch:"vdf_input"`
-	VDFOutput            string    `json:"vdf_output" ch:"vdf_output"`
-	VDFIterations        uint64    `json:"vdf_iterations" ch:"vdf_iterations"`
-	VDFProof             string    `json:"vdf_proof" ch:"vdf_proof"`
-	PreviousOutput       string    `json:"previous_output" ch:"previous_output"`
-	TransactionBatchHash string    `json:"transaction_batch_hash" ch:"transaction_batch_hash"`
-	TransactionCount     int32     `json:"transaction_count" ch:"transaction_count"`
-	ProcessedAt          time.Time `json:"processed_at" ch:"processed_at"`
-	IngestionTS          int64     `json:"ingestion_ts" ch:"ingestion_ts"`
-	Version              int32     `json:"version" ch:"version"`
-	Transactions         []TransactionData `json:"transactions"`
+	TickNumber       uint64    `json:"tick_number" ch:"tick_number"`
+	Height           uint64    `json:"height" ch:"height"`
+	BlockHash        string    `json:"block_hash" ch:"block_hash"`
+	ParentHash       string    `json:"parent_hash" ch:"parent_hash"`
+	TxCount          uint32    `json:"tx_count" ch:"tx_count"`
+	PayloadSizeBytes uint64    `json:"payload_size_bytes" ch:"payload_size_bytes"`
+	SizeBytes        uint64    `json:"size_bytes" ch:"size_bytes"`
+	Timestamp        uint64    `json:"timestamp" ch:"timestamp"`
+	ProcessedAt      time.Time `json:"processed_at" ch:"processed_at"`
+	ProposerID       string    `json:"proposer_id" ch:"proposer_id"`
+	ProposerKey      string    `json:"proposer_key" ch:"proposer_key"`
+	ChainID          string    `json:"chain_id" ch:"chain_id"`
+	Network          string    `json:"network" ch:"network"`
+	Version          int32     `json:"version" ch:"version"`
+	Transactions     []TransactionData `json:"transactions"`
 }
 
 type TransactionData struct {
@@ -127,16 +129,18 @@ func (r *ClickHouseRepository) GetTick(ctx context.Context, tickNumber uint64) (
 	query := `
 		SELECT
 			tick_number,
-			timestamp_us,
-			vdf_input,
-			vdf_output,
-			vdf_iterations,
-			vdf_proof,
-			previous_output,
-			transaction_batch_hash,
-			transaction_count,
+			height,
+			block_hash,
+			parent_hash,
+			tx_count,
+			payload_size_bytes,
+			size_bytes,
+			timestamp,
 			processed_at,
-			ingestion_ts,
+			proposer_id,
+			proposer_key,
+			chain_id,
+			network,
 			version
 		FROM ticks FINAL
 		WHERE tick_number = $1 AND version > 0
@@ -149,16 +153,18 @@ func (r *ClickHouseRepository) GetTick(ctx context.Context, tickNumber uint64) (
 	var tick TickData
 	err := row.Scan(
 		&tick.TickNumber,
-		&tick.TimestampUS,
-		&tick.VDFInput,
-		&tick.VDFOutput,
-		&tick.VDFIterations,
-		&tick.VDFProof,
-		&tick.PreviousOutput,
-		&tick.TransactionBatchHash,
-		&tick.TransactionCount,
+		&tick.Height,
+		&tick.BlockHash,
+		&tick.ParentHash,
+		&tick.TxCount,
+		&tick.PayloadSizeBytes,
+		&tick.SizeBytes,
+		&tick.Timestamp,
 		&tick.ProcessedAt,
-		&tick.IngestionTS,
+		&tick.ProposerID,
+		&tick.ProposerKey,
+		&tick.ChainID,
+		&tick.Network,
 		&tick.Version,
 	)
 	
@@ -248,20 +254,22 @@ func (r *ClickHouseRepository) GetRecentTicks(ctx context.Context, limit int) ([
 	query := `
 		SELECT
 			tick_number,
-			timestamp_us,
-			vdf_input,
-			vdf_output,
-			vdf_iterations,
-			vdf_proof,
-			previous_output,
-			transaction_batch_hash,
-			transaction_count,
+			height,
+			block_hash,
+			parent_hash,
+			tx_count,
+			payload_size_bytes,
+			size_bytes,
+			timestamp,
 			processed_at,
-			ingestion_ts,
+			proposer_id,
+			proposer_key,
+			chain_id,
+			network,
 			version
 		FROM ticks FINAL
 		WHERE version > 0
-		ORDER BY tick_number DESC
+		ORDER BY processed_at DESC, tick_number DESC
 		LIMIT $1
 	`
 	
@@ -276,16 +284,18 @@ func (r *ClickHouseRepository) GetRecentTicks(ctx context.Context, limit int) ([
 		var tick TickData
 		err := rows.Scan(
 			&tick.TickNumber,
-			&tick.TimestampUS,
-			&tick.VDFInput,
-			&tick.VDFOutput,
-			&tick.VDFIterations,
-			&tick.VDFProof,
-			&tick.PreviousOutput,
-			&tick.TransactionBatchHash,
-			&tick.TransactionCount,
+			&tick.Height,
+			&tick.BlockHash,
+			&tick.ParentHash,
+			&tick.TxCount,
+			&tick.PayloadSizeBytes,
+			&tick.SizeBytes,
+			&tick.Timestamp,
 			&tick.ProcessedAt,
-			&tick.IngestionTS,
+			&tick.ProposerID,
+			&tick.ProposerKey,
+			&tick.ChainID,
+			&tick.Network,
 			&tick.Version,
 		)
 		if err != nil {
@@ -328,7 +338,7 @@ func (r *ClickHouseRepository) GetRecentTransactions(ctx context.Context, limit 
 			version
 		FROM transactions FINAL
 		WHERE version > 0
-		ORDER BY tick_number DESC, sequence_number DESC
+		ORDER BY processed_at DESC, tick_number DESC, sequence_number DESC
 		LIMIT $1
 	`
 	
@@ -406,7 +416,7 @@ func (r *ClickHouseRepository) GetChainState(ctx context.Context, tickLimit *int
 		SELECT tx_hash, tick_number 
 		FROM transactions FINAL 
 		WHERE version > 0 
-		ORDER BY tick_number DESC 
+		ORDER BY processed_at DESC 
 		LIMIT 10
 	`
 	

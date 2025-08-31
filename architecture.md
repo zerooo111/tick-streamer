@@ -60,6 +60,7 @@ The Continuum Tick Streamer is a high-performance, production-ready Go applicati
 **Purpose**: High-throughput data ingestion from blockchain sequencer to persistent storage.
 
 **Key Responsibilities**:
+
 - Connect to sequencer gRPC stream
 - Parse and validate tick/transaction data
 - Batch data for optimal database performance
@@ -67,6 +68,7 @@ The Continuum Tick Streamer is a high-performance, production-ready Go applicati
 - Maintain checkpoint state for recovery
 
 **Performance Characteristics**:
+
 - **Target**: 10,000 transactions/second sustained throughput
 - **Latency**: <3s p95 ingest-to-query freshness
 - **Memory**: <512MB under steady-state
@@ -77,12 +79,14 @@ The Continuum Tick Streamer is a high-performance, production-ready Go applicati
 **Purpose**: High-performance REST and WebSocket API for querying blockchain data.
 
 **Key Responsibilities**:
+
 - Serve REST API endpoints for tick/transaction queries
 - Provide real-time WebSocket streaming
 - Proxy external service requests (Match Engine)
 - Implement intelligent data source routing
 
 **Data Flow Strategy**:
+
 1. **Primary**: Query ClickHouse for historical data
 2. **Fallback**: Query sequencer REST/gRPC for recent data
 3. **Response**: Return 404 if not found in either source
@@ -94,63 +98,168 @@ The Continuum Tick Streamer is a high-performance, production-ready Go applicati
 The system uses ClickHouse as the primary analytical database with ReplacingMergeTree engines for handling reorgs:
 
 ```sql
--- Ticks table with ReplacingMergeTree for versioning
-CREATE TABLE ticks (
-    tick_number UInt64,
-    timestamp_us Int64,
-    vdf_input String,
-    vdf_output String,
-    vdf_iterations UInt64,
-    vdf_proof String,
-    previous_output String,
-    transaction_batch_hash String,
-    transaction_count Int32,
-    processed_at DateTime64(6),
-    ingestion_ts Int64,
-    version Int32  -- ReplacingMergeTree version
-) ENGINE = ReplacingMergeTree(version)
-PARTITION BY toYYYYMM(toDateTime(timestamp_us / 1000000))
-ORDER BY tick_number;
+CREATE TABLE default.ticks
+(
+    `tick_number` UInt64,
+    `height` UInt64,
+    `block_hash` String CODEC(ZSTD(6)),
+    `parent_hash` String CODEC(ZSTD(6)),
+    `tx_count` UInt32,
+    `payload_size_bytes` UInt64,
+    `size_bytes` UInt64,
+    `timestamp` UInt64,
+    `processed_at` DateTime64(6),
+    `proposer_id` String CODEC(ZSTD(6)),
+    `proposer_key` String CODEC(ZSTD(6)),
+    `chain_id` LowCardinality(String),
+    `network` LowCardinality(String),
+    `version` Int32,
+    INDEX idx_block_hash block_hash TYPE bloom_filter(0.01) GRANULARITY 1,
+    INDEX idx_parent_hash parent_hash TYPE bloom_filter(0.01) GRANULARITY 1,
+    INDEX idx_chain chain_id TYPE set(100) GRANULARITY 1,
+    INDEX idx_network network TYPE set(100) GRANULARITY 1,
+    PROJECTION p_by_processed_full
+    (
+        SELECT
+            processed_at,
+            tick_number,
+            height,
+            block_hash,
+            parent_hash,
+            tx_count,
+            payload_size_bytes,
+            size_bytes,
+            timestamp,
+            proposer_id,
+            proposer_key,
+            chain_id,
+            network,
+            version
+        ORDER BY
+            processed_at,
+            tick_number
+    ),
+    PROJECTION p_recent_slim
+    (
+        SELECT
+            processed_at,
+            tick_number,
+            height,
+            block_hash,
+            tx_count,
+            network,
+            chain_id
+        ORDER BY
+            processed_at,
+            tick_number
+    ),
+    PROJECTION p_by_block_hash
+    (
+        SELECT
+            block_hash,
+            processed_at,
+            tick_number,
+            height,
+            parent_hash,
+            tx_count,
+            network,
+            chain_id,
+            version
+        ORDER BY block_hash
+    )
+)
+ENGINE = SharedReplacingMergeTree('/clickhouse/tables/{uuid}/{shard}', '{replica}', version)
+PARTITION BY toYYYYMMDD(processed_at)
+PRIMARY KEY (processed_at, tick_number)
+ORDER BY (processed_at, tick_number)
+TTL processed_at + toIntervalDay(7) RECOMPRESS CODEC(ZSTD(15))
+SETTINGS index_granularity = 2048, allow_nullable_key = 0, deduplicate_merge_projection_mode = 'rebuild'
 
 -- Transactions table with compound ordering
-CREATE TABLE transactions (
-    tick_number UInt64,
-    sequence_number UInt64,
-    tx_hash String,
-    tx_id String,
-    nonce UInt64,
-    payload String,  -- Base64 encoded
-    timestamp UInt64,
-    public_key String,
-    signature String,
-    ingestion_timestamp UInt64,
-    processed_at DateTime64(6),
-    payload_size Int32,
-    payload_type String,
-    version Int32
-) ENGINE = ReplacingMergeTree(version)
-PARTITION BY toYYYYMM(toDateTime(timestamp / 1000000))
-ORDER BY (tick_number, sequence_number);
+CREATE TABLE default.transactions
+(
+    `tick_number` UInt64,
+    `sequence_number` UInt64,
+    `tx_hash` String CODEC(ZSTD(6)),
+    `tx_id` String CODEC(ZSTD(6)),
+    `nonce` UInt64,
+    `payload` String CODEC(ZSTD(6)),
+    `timestamp` UInt64,
+    `public_key` String CODEC(ZSTD(6)),
+    `signature` String CODEC(ZSTD(6)),
+    `ingestion_timestamp` UInt64,
+    `processed_at` DateTime64(6),
+    `payload_size` Int32,
+    `payload_type` LowCardinality(String),
+    `version` Int32,
+    INDEX idx_tx_hash tx_hash TYPE bloom_filter(0.01) GRANULARITY 1,
+    INDEX idx_public_key public_key TYPE bloom_filter(0.01) GRANULARITY 1,
+    INDEX idx_payload_type payload_type TYPE set(100) GRANULARITY 1,
+    INDEX idx_tx_timestamp timestamp TYPE minmax GRANULARITY 8,
+    PROJECTION p_by_processed_full
+    (
+        SELECT
+            processed_at,
+            tick_number,
+            sequence_number,
+            tx_hash,
+            tx_id,
+            nonce,
+            payload,
+            timestamp,
+            public_key,
+            signature,
+            ingestion_timestamp,
+            payload_size,
+            payload_type,
+            version
+        ORDER BY
+            processed_at,
+            tick_number,
+            sequence_number
+    ),
+    PROJECTION p_recent_slim
+    (
+        SELECT
+            processed_at,
+            tx_hash,
+            public_key,
+            payload_type,
+            payload_size
+        ORDER BY
+            processed_at,
+            tick_number,
+            sequence_number
+    )
+)
+ENGINE = SharedReplacingMergeTree('/clickhouse/tables/{uuid}/{shard}', '{replica}', version)
+PARTITION BY toYYYYMMDD(processed_at)
+PRIMARY KEY (processed_at, tick_number)
+ORDER BY (processed_at, tick_number, sequence_number)
+TTL processed_at + toIntervalDay(7) RECOMPRESS CODEC(ZSTD(15))
+SETTINGS index_granularity = 2048, allow_nullable_key = 0, deduplicate_merge_projection_mode = 'rebuild'
 ```
 
 ### Data Consistency Model
 
 **Reorg Handling**:
+
 - Old data marked with `version = -1`
 - New canonical data inserted with `version = 1+`
 - Queries use `WHERE version > 0` or `FINAL` modifier
 - Atomic batch operations ensure consistency
 
 **Query Patterns**:
+
 ```sql
 -- Get canonical tick data
-SELECT * FROM ticks FINAL 
+SELECT * FROM ticks FINAL
 WHERE tick_number = ? AND version > 0
 ORDER BY version DESC LIMIT 1;
 
 -- Get recent transactions
 SELECT * FROM transactions FINAL
-WHERE version > 0 
+WHERE version > 0
 ORDER BY tick_number DESC, sequence_number DESC
 LIMIT ?;
 ```
@@ -187,12 +296,12 @@ LIMIT ?;
 **Key Components**:
 
 - **gRPC Client**: Maintains persistent connection to sequencer with automatic reconnection
-- **Parser/Transformer**: Converts protobuf data to internal models with validation  
+- **Parser/Transformer**: Converts protobuf data to internal models with validation
 - **Batcher**: Aggregates data using configurable size and time-based triggers
 - **Sink Interface**: Pluggable storage backends (ClickHouse, SQLite, Mock)
 - **Checkpoint System**: SQLite-based persistence for recovery and exactly-once processing
 
-### API Server Components  
+### API Server Components
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -250,7 +359,7 @@ CLICKHOUSE_DATABASE=continuum
 CLICKHOUSE_USERNAME=default
 CLICKHOUSE_PASSWORD=secure-password
 
-# API server configuration  
+# API server configuration
 API_PORT=3001
 REST_BASE_URL=http://sequencer-rest:8080/api/v1
 MATCH_ENGINE_URL=http://match-engine:8081/api/v1
@@ -282,7 +391,7 @@ The API server provides a comprehensive REST interface:
 GET  /                              - Service information
 GET  /api/v1/health                 - Health check
 GET  /api/v1/status                 - Sequencer status
-GET  /api/v1/tx/{hash}              - Get transaction by hash  
+GET  /api/v1/tx/{hash}              - Get transaction by hash
 POST /api/v1/tx                     - Submit transaction
 POST /api/v1/tx/batch               - Submit batch transactions
 GET  /api/v1/tick/{number}          - Get tick by number
@@ -299,7 +408,7 @@ All responses include data source tracking:
 
 ```http
 X-Data-Source: clickhouse    # Data from ClickHouse
-X-Data-Source: rest-api      # Data from REST fallback  
+X-Data-Source: rest-api      # Data from REST fallback
 X-Data-Source: grpc          # Data from gRPC fallback
 Cache-Control: private, max-age=600  # Caching directives
 ```
@@ -315,13 +424,13 @@ ws://api-server:3001/ws/ticks?start_tick=12345
 // Tick message format
 {
   "type": "tick",
-  "tick_number": "541456555", 
+  "tick_number": "541456555",
   "timestamp": "1755945316395000",
   "transaction_count": 1,
   "transactions": [...]
 }
 
-// Error message format  
+// Error message format
 {
   "type": "error",
   "error": "Connection lost to sequencer"
@@ -332,27 +441,28 @@ ws://api-server:3001/ws/ticks?start_tick=12345
 
 ### Streamer Service
 
-| Metric | Target | Notes |
-|--------|---------|-------|
-| Throughput | 10,000 tx/sec | Sustained under normal load |
-| Latency | <3s p95 | Ingest-to-query freshness |
-| Memory | <512MB | Steady-state with batching |
-| Recovery | <30s | From checkpoint after restart |
+| Metric     | Target        | Notes                         |
+| ---------- | ------------- | ----------------------------- |
+| Throughput | 10,000 tx/sec | Sustained under normal load   |
+| Latency    | <3s p95       | Ingest-to-query freshness     |
+| Memory     | <512MB        | Steady-state with batching    |
+| Recovery   | <30s          | From checkpoint after restart |
 
 ### API Server
 
-| Metric | Target | Notes |
-|--------|---------|-------|
-| Response Time | <100ms p95 | For ClickHouse queries |  
-| Throughput | 1,000 req/sec | Per endpoint sustained |
-| Concurrent WebSocket | 10,000 | Connections per instance |
-| Fallback Latency | <500ms | REST/gRPC proxy calls |
+| Metric               | Target        | Notes                    |
+| -------------------- | ------------- | ------------------------ |
+| Response Time        | <100ms p95    | For ClickHouse queries   |
+| Throughput           | 1,000 req/sec | Per endpoint sustained   |
+| Concurrent WebSocket | 10,000        | Connections per instance |
+| Fallback Latency     | <500ms        | REST/gRPC proxy calls    |
 
 ### Database Performance
 
 **ClickHouse Optimizations**:
+
 - Partitioning by month for time-based queries
-- Compound ordering for multi-dimensional access  
+- Compound ordering for multi-dimensional access
 - ReplacingMergeTree for automatic deduplication
 - Index granularity tuned for query patterns
 - Background merges for optimal storage
@@ -363,7 +473,7 @@ ws://api-server:3001/ws/ticks?start_tick=12345
 
 ```yaml
 # docker-compose.yml structure
-version: '3.8'
+version: "3.8"
 services:
   streamer:
     image: continuum/streamer:latest
@@ -373,7 +483,7 @@ services:
     depends_on:
       - clickhouse
       - sequencer
-      
+
   api-server:
     image: continuum/api-server:latest
     ports:
@@ -384,7 +494,7 @@ services:
     depends_on:
       - clickhouse
       - streamer
-      
+
   clickhouse:
     image: clickhouse/clickhouse-server:latest
     ports:
@@ -397,12 +507,14 @@ services:
 ### Scaling Patterns
 
 **Horizontal Scaling**:
+
 - Multiple API server instances behind load balancer
 - Single streamer instance (stateful checkpoint system)
 - ClickHouse cluster for high-availability
 - WebSocket sticky sessions for connection management
 
 **Vertical Scaling**:
+
 - Streamer: CPU-bound (parsing) + Memory (batching)
 - API Server: CPU-bound (concurrent requests)
 - ClickHouse: I/O and Memory intensive
@@ -415,7 +527,7 @@ services:
 # Streamer health (internal metrics)
 curl http://streamer:8080/health
 
-# API Server health  
+# API Server health
 curl http://api-server:3001/api/v1/health
 
 # ClickHouse health
@@ -425,9 +537,10 @@ curl http://clickhouse:8123/ping
 ### Metrics Collection
 
 **Key Metrics**:
+
 - `stream_ticks_received_total` - Ticks processed by streamer
 - `api_requests_total` - API requests by endpoint and status
-- `websocket_connections_active` - Current WebSocket connections  
+- `websocket_connections_active` - Current WebSocket connections
 - `clickhouse_query_duration_seconds` - Database query performance
 - `batch_size_bytes` - Ingestion batch sizes
 - `checkpoint_lag_seconds` - Recovery point objective
@@ -435,10 +548,11 @@ curl http://clickhouse:8123/ping
 ### Logging Strategy
 
 **Structured JSON Logging**:
+
 ```json
 {
   "timestamp": "2025-08-24T11:20:08Z",
-  "level": "info", 
+  "level": "info",
   "service": "api-server",
   "component": "handlers",
   "action": "get_tick",
@@ -454,11 +568,13 @@ curl http://clickhouse:8123/ping
 ### Failure Modes
 
 1. **Sequencer Disconnection**
+
    - Exponential backoff reconnection
    - Checkpoint-based recovery
    - Graceful degradation of API responses
 
-2. **ClickHouse Unavailability**  
+2. **ClickHouse Unavailability**
+
    - Automatic fallback to REST/gRPC
    - Connection pooling with health checks
    - Circuit breaker pattern
@@ -471,6 +587,7 @@ curl http://clickhouse:8123/ping
 ### Recovery Procedures
 
 **Streamer Recovery**:
+
 ```bash
 # Check last checkpoint
 sqlite3 checkpoint.db "SELECT * FROM checkpoints ORDER BY tick_number DESC LIMIT 1;"
@@ -480,14 +597,15 @@ RESTART_FROM_TICK=12345 make run
 ```
 
 **Data Integrity Verification**:
+
 ```sql
 -- Verify data consistency
-SELECT 
+SELECT
   tick_number,
   COUNT(*) as versions,
   MAX(version) as latest_version
-FROM ticks 
-GROUP BY tick_number 
+FROM ticks
+GROUP BY tick_number
 HAVING COUNT(*) > 1
 ORDER BY tick_number DESC
 LIMIT 10;
@@ -496,18 +614,21 @@ LIMIT 10;
 ## Security Considerations
 
 ### Network Security
+
 - TLS termination at load balancer
 - Internal service mesh with mTLS
 - Network policies for service isolation
 - Rate limiting and DDoS protection
 
-### Data Security  
+### Data Security
+
 - Encryption at rest for ClickHouse
 - Connection string encryption in configs
 - Audit logging for data access
 - Regular security updates and patches
 
 ### Authentication & Authorization
+
 - API key-based authentication for external access
 - Service-to-service authentication via certificates
 - Role-based access control for database users
@@ -534,12 +655,12 @@ make run          # Start streamer (separate terminal)
 # Unit tests
 go test ./...
 
-# Integration tests  
+# Integration tests
 make test-clickhouse    # Requires ClickHouse instance
 make test-sinks        # Test all sink implementations
 
 # Load testing
-make run & 
+make run &
 curl -X POST http://localhost:3001/api/v1/tx/batch -d @test_batch.json
 ```
 
@@ -551,7 +672,7 @@ tick-streamer/
 │   ├── streamer/          # Streamer service main
 │   └── api-server/        # API server main
 ├── internal/              # Private application code
-│   ├── api/              # API server components  
+│   ├── api/              # API server components
 │   │   ├── handlers/     # HTTP request handlers
 │   │   ├── middleware/   # HTTP middleware
 │   │   ├── repository/   # Data access layer
@@ -570,18 +691,21 @@ tick-streamer/
 ## Future Roadmap
 
 ### Performance Enhancements
+
 - [ ] Parallel batch processing in streamer
 - [ ] Connection pooling for ClickHouse
 - [ ] Query result caching layer
 - [ ] Metrics-based auto-scaling
 
-### Feature Additions  
+### Feature Additions
+
 - [ ] Historical data export API
 - [ ] Advanced filtering and search
 - [ ] Real-time analytics dashboards
 - [ ] Multi-tenant support
 
 ### Operational Improvements
+
 - [ ] Prometheus metrics integration
 - [ ] Distributed tracing support
 - [ ] Automated backup and restore
