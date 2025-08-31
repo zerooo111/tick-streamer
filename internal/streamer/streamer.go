@@ -412,7 +412,25 @@ func (s *Streamer) attemptStreaming(ctx context.Context, startTick uint64) error
 			}, "tick processing")
 			
 			if err != nil {
-				log.Printf("⚠️ Error processing tick %d: %v", tick.TickNumber, err)
+				// Enhanced error logging with circuit breaker context
+				if strings.Contains(err.Error(), "circuit breaker open") {
+					stats := s.circuitBreaker.GetStats()
+					resetTime := s.circuitBreaker.GetNextResetTime()
+					timeUntilReset := time.Until(resetTime)
+					
+					// Provide comprehensive circuit breaker diagnostics
+					log.Printf("⚠️ Error processing tick %d: %v", tick.TickNumber, err)
+					log.Printf("🔴 Circuit Breaker Status: OPEN - consecutive failures: %d/%d, last failure: %v ago", 
+						stats.CurrentFailures, stats.FailureThreshold, time.Since(stats.LastFailureTime).Truncate(time.Second))
+					if !resetTime.IsZero() {
+						log.Printf("🕐 Circuit will attempt reset in: %v (at %s)", 
+							timeUntilReset.Truncate(time.Second), resetTime.Format("15:04:05"))
+					}
+					log.Printf("📊 Overall stats: %d total requests, %d successes, %d failures", 
+						stats.TotalRequests, stats.SuccessCount, stats.FailureCount)
+				} else {
+					log.Printf("⚠️ Error processing tick %d: %v", tick.TickNumber, err)
+				}
 				// For critical errors, we might want to fail the stream
 				// For non-critical errors, we continue processing
 				if s.isCriticalError(err) {

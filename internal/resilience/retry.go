@@ -210,7 +210,9 @@ func (cb *CircuitBreaker) Execute(ctx context.Context, fn func() error, operatio
 			log.Printf("🔄 Circuit breaker for %s transitioning to HALF-OPEN", operation)
 			cb.state = CircuitHalfOpen
 		} else {
-			return fmt.Errorf("circuit breaker open for %s", operation)
+			timeUntilReset := time.Until(cb.lastFailureTime.Add(cb.resetTimeout))
+			return fmt.Errorf("circuit breaker open for %s (failures: %d/%d, resets in %v)", 
+				operation, cb.failures, cb.maxFailures, timeUntilReset.Truncate(time.Second))
 		}
 	}
 	
@@ -239,7 +241,9 @@ func (cb *CircuitBreaker) onFailure(operation string) {
 		cb.state = CircuitOpen
 	} else if cb.failures >= cb.maxFailures {
 		// Too many failures, open the circuit
-		log.Printf("🚨 Circuit breaker for %s: CLOSED → OPEN (%d failures)", operation, cb.failures)
+		nextReset := cb.lastFailureTime.Add(cb.resetTimeout)
+		log.Printf("🚨 Circuit breaker for %s: CLOSED → OPEN (%d consecutive failures, will reset at %s)", 
+			operation, cb.failures, nextReset.Format("15:04:05"))
 		cb.state = CircuitOpen
 	}
 }
@@ -267,8 +271,18 @@ func (cb *CircuitBreaker) GetStats() CircuitBreakerStats {
 		SuccessCount:  cb.successCount,
 		FailureCount:  cb.failureCount,
 		CurrentFailures: cb.failures,
+		FailureThreshold: cb.maxFailures,
 		LastFailureTime: cb.lastFailureTime,
+		ResetTimeout:    cb.resetTimeout,
 	}
+}
+
+// GetNextResetTime returns when the circuit breaker will next attempt to reset
+func (cb *CircuitBreaker) GetNextResetTime() time.Time {
+	if cb.state == CircuitOpen {
+		return cb.lastFailureTime.Add(cb.resetTimeout)
+	}
+	return time.Time{} // Return zero time if not open
 }
 
 // CircuitBreakerStats contains circuit breaker statistics
@@ -278,7 +292,9 @@ type CircuitBreakerStats struct {
 	SuccessCount    int64
 	FailureCount    int64
 	CurrentFailures int
+	FailureThreshold int
 	LastFailureTime time.Time
+	ResetTimeout    time.Duration
 }
 
 // HealthChecker defines an interface for health checking
