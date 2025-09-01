@@ -29,10 +29,10 @@ type Handler struct {
 	restBaseURL    string
 	matchEngineURL string
 	httpClient     *http.Client
-	repository     *repository.ClickHouseRepository
+	repository     repository.Repository
 }
 
-func New(grpcAddr, restBaseURL, matchEngineURL string, repo *repository.ClickHouseRepository) (*Handler, error) {
+func New(grpcAddr, restBaseURL, matchEngineURL string, repo repository.Repository) (*Handler, error) {
 	// Create gRPC connection
 	conn, err := grpc.NewClient(grpcAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
@@ -136,11 +136,11 @@ func (h *Handler) GetTransaction(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Try ClickHouse first
+	// Try database first
 	tx, err := h.repository.GetTransaction(ctx, txHash)
 	if err == nil {
 		c.Header("Cache-Control", "private, max-age=1800")
-		c.Header("X-Data-Source", "clickhouse")
+		c.Header("X-Data-Source", "database")
 		c.JSON(http.StatusOK, gin.H{
 			"source": "db",
 			"data":   tx,
@@ -261,11 +261,11 @@ func (h *Handler) GetTick(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Try ClickHouse first
+	// Try database first
 	tick, err := h.repository.GetTick(ctx, tickNumber)
 	if err == nil {
 		c.Header("Cache-Control", "private, max-age=600")
-		c.Header("X-Data-Source", "clickhouse")
+		c.Header("X-Data-Source", "database")
 		c.JSON(http.StatusOK, gin.H{
 			"source": "db",
 			"data":   tick,
@@ -366,42 +366,29 @@ func (h *Handler) GetRecentTransactions(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Try ClickHouse first
+	// Try database first
 	transactions, err := h.repository.GetRecentTransactions(ctx, limit)
 	if err == nil {
 		c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
-		c.Header("X-Data-Source", "clickhouse")
+		c.Header("X-Data-Source", "database")
 		c.JSON(http.StatusOK, gin.H{
 			"transactions": transactions,
 			"count":        len(transactions),
 		})
 		return
 	}
-
-	// Fallback to REST API
-	continuumURL := fmt.Sprintf("%s/transactions/recent?limit=%d", h.restBaseURL, limit)
 	
-	resp, err := h.httpClient.Get(continuumURL)
-	if err != nil {
-		apiErrors.ServiceUnavailableError(c, fmt.Errorf("failed to get recent transactions"))
-		return
-	}
-	defer resp.Body.Close()
+	// Log database error for debugging  
+	fmt.Printf("Database query failed for recent transactions: %v\n", err)
 
-	if resp.StatusCode != http.StatusOK {
-		apiErrors.ServiceUnavailableError(c, fmt.Errorf("upstream service returned status %d", resp.StatusCode))
-		return
-	}
-
-	var data interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		apiErrors.InternalError(c, err)
-		return
-	}
-
+	// Return empty result - database may not have data yet
 	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
-	c.Header("X-Data-Source", "rest-api")
-	c.JSON(http.StatusOK, data)
+	c.Header("X-Data-Source", "database_unavailable")
+	c.JSON(http.StatusOK, gin.H{
+		"transactions": []interface{}{},
+		"count":        0,
+		"message":      "Recent transactions unavailable - database may not be populated yet",
+	})
 }
 
 // Get chain state
@@ -421,11 +408,11 @@ func (h *Handler) GetChainState(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Try ClickHouse first
+	// Try database first
 	chainState, err := h.repository.GetChainState(ctx, tickLimit)
 	if err == nil {
 		c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
-		c.Header("X-Data-Source", "clickhouse")
+		c.Header("X-Data-Source", "database")
 		c.JSON(http.StatusOK, chainState)
 		return
 	}

@@ -23,7 +23,7 @@ type Server struct {
 	handler    *handlers.Handler
 	wsHub      *websocket.Hub
 	config     *config.Config
-	repository *repository.ClickHouseRepository
+	repository repository.Repository
 	logWriter  *middleware.LogWriter
 }
 
@@ -44,10 +44,10 @@ func NewServer(cfg *config.Config) (*Server, error) {
 		return nil, fmt.Errorf("failed to create log writer: %w", err)
 	}
 
-	// Create ClickHouse repository
-	repo, err := repository.NewClickHouseRepository(cfg)
+	// Create repository based on SINK_KIND configuration
+	repo, err := repository.NewRepository(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create ClickHouse repository: %w", err)
+		return nil, fmt.Errorf("failed to create repository: %w", err)
 	}
 
 	// Create handlers
@@ -200,11 +200,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		log.Println("✅ gRPC client closed")
 	}
 
-	// Close ClickHouse repository
+	// Close database repository  
 	if s.repository != nil {
-		log.Println("🗄️ Closing ClickHouse repository...")
+		log.Println("🗄️ Closing database repository...")
 		s.repository.Close()
-		log.Println("✅ ClickHouse repository closed")
+		log.Println("✅ Database repository closed")
 	}
 
 	// Close log writer

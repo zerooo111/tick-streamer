@@ -7,7 +7,7 @@ A **ultra-low latency**, high-performance streaming data ingestor for blockchain
 ### Prerequisites
 
 - **Go 1.21+** installed
-- **ClickHouse** database access (or use debug mode)
+- **TimescaleDB** database access (or use debug mode)
 
 ### Running the Streamer
 
@@ -47,12 +47,12 @@ BATCH_MAX_WAIT_MS=10     # Fast timeout: 100ms→10ms
 
 **Traditional Mode** (High Throughput):
 ```
-gRPC Stream → Parser → Batcher → ClickHouse
+gRPC Stream → Parser → Batcher → TimescaleDB
 ```
 
 **Streaming Mode** (Ultra-Low Latency):
 ```
-gRPC Stream → Parser → Direct Write → ClickHouse
+gRPC Stream → Parser → Direct Write → TimescaleDB
 ```
 
 ### Key Components
@@ -60,7 +60,7 @@ gRPC Stream → Parser → Direct Write → ClickHouse
 - **Streamer**: gRPC connection management with resilience patterns
 - **Parser**: Pluggable data transformation (supports raw protobuf passthrough)
 - **Batcher**: Concurrent batching system (optional in streaming mode)
-- **Sink**: ClickHouse-optimized database layer
+- **Sink**: TimescaleDB-optimized database layer
 - **No Checkpoints**: Always starts from latest tick (0) for real-time streaming
 
 ## ⚙️ Configuration
@@ -76,18 +76,23 @@ gRPC Stream → Parser → Direct Write → ClickHouse
 | `SKIP_PARSING` | `false` | Store raw protobuf for minimal overhead |
 | `SEQUENCER_ADDR` | `54.242.85.197:9090` | gRPC sequencer address |
 
-### ClickHouse Configuration
+### Database Configuration
 
+#### TimescaleDB Mode
 ```bash
-CLICKHOUSE_HOST=your-host.clickhouse.cloud
-CLICKHOUSE_PORT=9440
-CLICKHOUSE_DATABASE=default
-CLICKHOUSE_USERNAME=default
-CLICKHOUSE_PASSWORD=your-password
+SINK_KIND=timescaledb
+TIMESCALEDB_HOST=localhost
+TIMESCALEDB_PORT=5432
+TIMESCALEDB_DATABASE=continuum
+TIMESCALEDB_USERNAME=postgres
+TIMESCALEDB_PASSWORD=your-password
+```
 
-# Optimized for low latency
-CLICKHOUSE_BATCH_SIZE=100     # Down from 10000
-CLICKHOUSE_FLUSH_INTERVAL=100ms  # Down from 5s
+#### Debug Mode (No Database)
+```bash
+SINK_KIND=debug
+# No database connection required
+# Logs all operations for development/testing
 ```
 
 ## 📊 What You'll See
@@ -172,7 +177,7 @@ tail -f logs/streamer.log | grep "STREAMING"
 
 1. **Check mode**: Ensure `STREAMING_MODE=true`
 2. **Batch sizes**: Use small batches (100 rows, 10ms timeout)
-3. **Network**: Verify ClickHouse connectivity
+3. **Network**: Verify TimescaleDB connectivity
 4. **Parsing**: Consider `SKIP_PARSING=true` for raw storage
 
 ### Connection Issues
@@ -181,8 +186,8 @@ tail -f logs/streamer.log | grep "STREAMING"
 # Test sequencer connectivity
 telnet 54.242.85.197 9090
 
-# Test ClickHouse connectivity
-curl https://your-host.clickhouse.cloud:8443/ping
+# Test TimescaleDB connectivity
+psql -h localhost -U postgres -d continuum -c "SELECT 1;"
 ```
 
 ## 📁 Project Structure
@@ -197,7 +202,7 @@ tick-streamer/
 │   ├── streamer/         # Core streaming logic + optimizations
 │   ├── parser/           # Pluggable data transformation
 │   ├── batcher/          # Concurrent batching (optional)
-│   ├── sink/             # ClickHouse-optimized database layer
+│   ├── sink/             # TimescaleDB-optimized database layer
 │   ├── resilience/       # Circuit breakers, retries, health
 │   └── validation/       # Tick validation and reorg detection
 ├── proto/                # gRPC definitions
@@ -240,7 +245,7 @@ DEBUG_MODE=true ./streamer
 **Before Optimization**: 10-20 second latency (large batches, checkpoint overhead)
 **After Optimization**: Sub-second latency (direct writes, no checkpoints)
 
-**Improvement**: **99%+ latency reduction** while maintaining data integrity and ClickHouse's high throughput capabilities.
+**Improvement**: **99%+ latency reduction** while maintaining data integrity and TimescaleDB's high throughput time-series capabilities.
 
 ---
 

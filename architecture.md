@@ -24,7 +24,7 @@ The Continuum Tick Streamer is a high-performance, production-ready Go applicati
 │            │                    │                    │          │
 │            ▼                    ▼                    ▼          │
 │  ┌─────────────────────────────────────────────────────────────┐ │
-│  │              ClickHouse Repository                         │ │
+│  │              TimescaleDB Repository                        │ │
 │  │         (Primary Data Source + Fallback)                  │ │
 │  └─────────────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────┘
@@ -43,7 +43,7 @@ The Continuum Tick Streamer is a high-performance, production-ready Go applicati
                                                         │
                                                         ▼
                                              ┌─────────────────┐
-                                             │   ClickHouse    │
+                                             │   TimescaleDB   │
                                              │   Database      │
                                              │                 │
                                              │ ┌─────────────┐ │
@@ -87,157 +87,94 @@ The Continuum Tick Streamer is a high-performance, production-ready Go applicati
 
 **Data Flow Strategy**:
 
-1. **Primary**: Query ClickHouse for historical data
+1. **Primary**: Query TimescaleDB for historical data
 2. **Fallback**: Query sequencer REST/gRPC for recent data
 3. **Response**: Return 404 if not found in either source
 
 ## Data Architecture
 
-### ClickHouse Schema
+### TimescaleDB Schema
 
-The system uses ClickHouse as the primary analytical database with ReplacingMergeTree engines for handling reorgs:
+The system uses TimescaleDB as the primary time-series database with hypertables and compression for efficient storage:
 
 ```sql
-CREATE TABLE default.ticks
-(
-    `tick_number` UInt64,
-    `height` UInt64,
-    `block_hash` String CODEC(ZSTD(6)),
-    `parent_hash` String CODEC(ZSTD(6)),
-    `tx_count` UInt32,
-    `payload_size_bytes` UInt64,
-    `size_bytes` UInt64,
-    `timestamp` UInt64,
-    `processed_at` DateTime64(6),
-    `proposer_id` String CODEC(ZSTD(6)),
-    `proposer_key` String CODEC(ZSTD(6)),
-    `chain_id` LowCardinality(String),
-    `network` LowCardinality(String),
-    `version` Int32,
-    INDEX idx_block_hash block_hash TYPE bloom_filter(0.01) GRANULARITY 1,
-    INDEX idx_parent_hash parent_hash TYPE bloom_filter(0.01) GRANULARITY 1,
-    INDEX idx_chain chain_id TYPE set(100) GRANULARITY 1,
-    INDEX idx_network network TYPE set(100) GRANULARITY 1,
-    PROJECTION p_by_processed_full
-    (
-        SELECT
-            processed_at,
-            tick_number,
-            height,
-            block_hash,
-            parent_hash,
-            tx_count,
-            payload_size_bytes,
-            size_bytes,
-            timestamp,
-            proposer_id,
-            proposer_key,
-            chain_id,
-            network,
-            version
-        ORDER BY
-            processed_at,
-            tick_number
-    ),
-    PROJECTION p_recent_slim
-    (
-        SELECT
-            processed_at,
-            tick_number,
-            height,
-            block_hash,
-            tx_count,
-            network,
-            chain_id
-        ORDER BY
-            processed_at,
-            tick_number
-    ),
-    PROJECTION p_by_block_hash
-    (
-        SELECT
-            block_hash,
-            processed_at,
-            tick_number,
-            height,
-            parent_hash,
-            tx_count,
-            network,
-            chain_id,
-            version
-        ORDER BY block_hash
-    )
-)
-ENGINE = SharedReplacingMergeTree('/clickhouse/tables/{uuid}/{shard}', '{replica}', version)
-PARTITION BY toYYYYMMDD(processed_at)
-PRIMARY KEY (processed_at, tick_number)
-ORDER BY (processed_at, tick_number)
-TTL processed_at + toIntervalDay(7) RECOMPRESS CODEC(ZSTD(15))
-SETTINGS index_granularity = 2048, allow_nullable_key = 0, deduplicate_merge_projection_mode = 'rebuild'
+-- Ticks hypertable for time-series blockchain data
+CREATE TABLE public.ticks (
+    tick_number BIGINT NOT NULL,
+    height BIGINT NOT NULL,
+    block_hash TEXT NOT NULL,
+    parent_hash TEXT NOT NULL,
+    tx_count INTEGER NOT NULL,
+    payload_size_bytes BIGINT NOT NULL,
+    size_bytes BIGINT NOT NULL,
+    timestamp BIGINT NOT NULL,
+    processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    proposer_id TEXT NOT NULL,
+    proposer_key TEXT NOT NULL,
+    chain_id TEXT NOT NULL,
+    network TEXT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    
+    CONSTRAINT pk_ticks PRIMARY KEY (processed_at, tick_number)
+);
 
--- Transactions table with compound ordering
-CREATE TABLE default.transactions
-(
-    `tick_number` UInt64,
-    `sequence_number` UInt64,
-    `tx_hash` String CODEC(ZSTD(6)),
-    `tx_id` String CODEC(ZSTD(6)),
-    `nonce` UInt64,
-    `payload` String CODEC(ZSTD(6)),
-    `timestamp` UInt64,
-    `public_key` String CODEC(ZSTD(6)),
-    `signature` String CODEC(ZSTD(6)),
-    `ingestion_timestamp` UInt64,
-    `processed_at` DateTime64(6),
-    `payload_size` Int32,
-    `payload_type` LowCardinality(String),
-    `version` Int32,
-    INDEX idx_tx_hash tx_hash TYPE bloom_filter(0.01) GRANULARITY 1,
-    INDEX idx_public_key public_key TYPE bloom_filter(0.01) GRANULARITY 1,
-    INDEX idx_payload_type payload_type TYPE set(100) GRANULARITY 1,
-    INDEX idx_tx_timestamp timestamp TYPE minmax GRANULARITY 8,
-    PROJECTION p_by_processed_full
-    (
-        SELECT
-            processed_at,
-            tick_number,
-            sequence_number,
-            tx_hash,
-            tx_id,
-            nonce,
-            payload,
-            timestamp,
-            public_key,
-            signature,
-            ingestion_timestamp,
-            payload_size,
-            payload_type,
-            version
-        ORDER BY
-            processed_at,
-            tick_number,
-            sequence_number
-    ),
-    PROJECTION p_recent_slim
-    (
-        SELECT
-            processed_at,
-            tx_hash,
-            public_key,
-            payload_type,
-            payload_size
-        ORDER BY
-            processed_at,
-            tick_number,
-            sequence_number
-    )
-)
-ENGINE = SharedReplacingMergeTree('/clickhouse/tables/{uuid}/{shard}', '{replica}', version)
-PARTITION BY toYYYYMMDD(processed_at)
-PRIMARY KEY (processed_at, tick_number)
-ORDER BY (processed_at, tick_number, sequence_number)
-TTL processed_at + toIntervalDay(7) RECOMPRESS CODEC(ZSTD(15))
-SETTINGS index_granularity = 2048, allow_nullable_key = 0, deduplicate_merge_projection_mode = 'rebuild'
+-- Convert to hypertable partitioned by time
+SELECT create_hypertable('public.ticks', 'processed_at', 
+    chunk_time_interval => INTERVAL '1 day');
+
+-- Create indexes for common queries
+CREATE INDEX CONCURRENTLY idx_ticks_tick_number ON public.ticks (tick_number);
+CREATE INDEX CONCURRENTLY idx_ticks_block_hash ON public.ticks USING HASH (block_hash);
+CREATE INDEX CONCURRENTLY idx_ticks_chain_network ON public.ticks (chain_id, network);
+CREATE INDEX CONCURRENTLY idx_ticks_version ON public.ticks (version) WHERE version > 0;
+
+-- Enable compression for older chunks (7 days)
+ALTER TABLE public.ticks SET (
+    timescaledb.compress,
+    timescaledb.compress_segmentby = 'chain_id,network',
+    timescaledb.compress_orderby = 'processed_at DESC, tick_number DESC'
+);
+
+SELECT add_compression_policy('public.ticks', INTERVAL '7 days');
+
+-- Transactions hypertable
+CREATE TABLE public.transactions (
+    tick_number BIGINT NOT NULL,
+    sequence_number BIGINT NOT NULL,
+    tx_hash TEXT NOT NULL,
+    tx_id TEXT NOT NULL,
+    nonce BIGINT NOT NULL,
+    payload TEXT NOT NULL,
+    timestamp BIGINT NOT NULL,
+    public_key TEXT NOT NULL,
+    signature TEXT NOT NULL,
+    ingestion_timestamp BIGINT NOT NULL,
+    processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    payload_size INTEGER NOT NULL,
+    payload_type TEXT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    
+    CONSTRAINT pk_transactions PRIMARY KEY (processed_at, tick_number, sequence_number)
+);
+
+-- Convert to hypertable
+SELECT create_hypertable('public.transactions', 'processed_at',
+    chunk_time_interval => INTERVAL '1 day');
+
+-- Create indexes for transactions
+CREATE INDEX CONCURRENTLY idx_transactions_tx_hash ON public.transactions USING HASH (tx_hash);
+CREATE INDEX CONCURRENTLY idx_transactions_public_key ON public.transactions USING HASH (public_key);
+CREATE INDEX CONCURRENTLY idx_transactions_payload_type ON public.transactions (payload_type);
+CREATE INDEX CONCURRENTLY idx_transactions_version ON public.transactions (version) WHERE version > 0;
+
+-- Enable compression
+ALTER TABLE public.transactions SET (
+    timescaledb.compress,
+    timescaledb.compress_segmentby = 'payload_type',
+    timescaledb.compress_orderby = 'processed_at DESC, tick_number DESC, sequence_number DESC'
+);
+
+SELECT add_compression_policy('public.transactions', INTERVAL '7 days');
 ```
 
 ### Data Consistency Model
@@ -252,15 +189,15 @@ SETTINGS index_granularity = 2048, allow_nullable_key = 0, deduplicate_merge_pro
 **Query Patterns**:
 
 ```sql
--- Get canonical tick data
-SELECT * FROM ticks FINAL
+-- Get canonical tick data (latest version)
+SELECT * FROM public.ticks
 WHERE tick_number = ? AND version > 0
 ORDER BY version DESC LIMIT 1;
 
 -- Get recent transactions
-SELECT * FROM transactions FINAL
+SELECT * FROM public.transactions
 WHERE version > 0
-ORDER BY tick_number DESC, sequence_number DESC
+ORDER BY processed_at DESC, tick_number DESC, sequence_number DESC
 LIMIT ?;
 ```
 
@@ -287,7 +224,7 @@ LIMIT ?;
 │                                              │               │
 │                                              ▼               │
 │              ┌─────────────┐  ┌─────────────┐  ┌───────────┐ │
-│              │ ClickHouse  │  │   SQLite    │  │   Mock    │ │
+│              │ TimescaleDB │  │   Debug     │  │   Mock    │ │
 │              │    Sink     │  │    Sink     │  │   Sink    │ │
 │              └─────────────┘  └─────────────┘  └───────────┘ │
 └─────────────────────────────────────────────────────────────┘
@@ -298,7 +235,7 @@ LIMIT ?;
 - **gRPC Client**: Maintains persistent connection to sequencer with automatic reconnection
 - **Parser/Transformer**: Converts protobuf data to internal models with validation
 - **Batcher**: Aggregates data using configurable size and time-based triggers
-- **Sink Interface**: Pluggable storage backends (ClickHouse, SQLite, Mock)
+- **Sink Interface**: Pluggable storage backends (TimescaleDB, Debug, Mock)
 - **Checkpoint System**: SQLite-based persistence for recovery and exactly-once processing
 
 ### API Server Components
@@ -315,7 +252,7 @@ LIMIT ?;
 │                                              │               │
 │                                              ▼               │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐  │
-│  │ WebSocket   │  │ Repository  │  │   ClickHouse        │  │
+│  │ WebSocket   │  │ Repository  │  │   TimescaleDB       │  │
 │  │    Hub      │  │   Layer     │──┤   Repository        │  │
 │  │             │  │             │  │                     │  │
 │  └─────────────┘  └─────────────┘  └─────────────────────┘  │
@@ -349,15 +286,15 @@ SEQUENCER_TLS=false
 SEQUENCER_MTLS=false
 
 # Database sink configuration
-SINK_KIND=clickhouse
-SINK_DSN=clickhouse://user:pass@host:port/db
+SINK_KIND=timescaledb
+SINK_DSN=postgres://user:pass@host:port/db
 
-# ClickHouse configuration
-CLICKHOUSE_HOST=clickhouse-host
-CLICKHOUSE_PORT=9440
-CLICKHOUSE_DATABASE=continuum
-CLICKHOUSE_USERNAME=default
-CLICKHOUSE_PASSWORD=secure-password
+# TimescaleDB configuration
+TIMESCALEDB_HOST=timescaledb-host
+TIMESCALEDB_PORT=5432
+TIMESCALEDB_DATABASE=continuum
+TIMESCALEDB_USERNAME=postgres
+TIMESCALEDB_PASSWORD=secure-password
 
 # API server configuration
 API_PORT=3001
@@ -407,7 +344,7 @@ WS   /ws/ticks                      - Real-time tick stream
 All responses include data source tracking:
 
 ```http
-X-Data-Source: clickhouse    # Data from ClickHouse
+X-Data-Source: timescaledb   # Data from TimescaleDB
 X-Data-Source: rest-api      # Data from REST fallback
 X-Data-Source: grpc          # Data from gRPC fallback
 Cache-Control: private, max-age=600  # Caching directives
@@ -452,20 +389,20 @@ ws://api-server:3001/ws/ticks?start_tick=12345
 
 | Metric               | Target        | Notes                    |
 | -------------------- | ------------- | ------------------------ |
-| Response Time        | <100ms p95    | For ClickHouse queries   |
+| Response Time        | <100ms p95    | For TimescaleDB queries  |
 | Throughput           | 1,000 req/sec | Per endpoint sustained   |
 | Concurrent WebSocket | 10,000        | Connections per instance |
 | Fallback Latency     | <500ms        | REST/gRPC proxy calls    |
 
 ### Database Performance
 
-**ClickHouse Optimizations**:
+**TimescaleDB Optimizations**:
 
-- Partitioning by month for time-based queries
-- Compound ordering for multi-dimensional access
-- ReplacingMergeTree for automatic deduplication
-- Index granularity tuned for query patterns
-- Background merges for optimal storage
+- Automatic time-based partitioning with hypertables
+- Compression policies for efficient storage
+- Time-series optimized indexes
+- Continuous aggregates for fast analytics
+- Background compression and retention policies
 
 ## Deployment Architecture
 
@@ -478,10 +415,10 @@ services:
   streamer:
     image: continuum/streamer:latest
     environment:
-      - SINK_KIND=clickhouse
-      - CLICKHOUSE_HOST=clickhouse
+      - SINK_KIND=timescaledb
+      - TIMESCALEDB_HOST=timescaledb
     depends_on:
-      - clickhouse
+      - timescaledb
       - sequencer
 
   api-server:
@@ -489,19 +426,22 @@ services:
     ports:
       - "3001:3001"
     environment:
-      - CLICKHOUSE_HOST=clickhouse
+      - TIMESCALEDB_HOST=timescaledb
       - REST_BASE_URL=http://sequencer:8080/api/v1
     depends_on:
-      - clickhouse
+      - timescaledb
       - streamer
 
-  clickhouse:
-    image: clickhouse/clickhouse-server:latest
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
     ports:
-      - "9440:9440" # Secure native TCP
-      - "8123:8123" # HTTP interface
+      - "5432:5432" # PostgreSQL port
     volumes:
-      - clickhouse_data:/var/lib/clickhouse
+      - timescaledb_data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_DB=continuum
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=secure-password
 ```
 
 ### Scaling Patterns
@@ -510,14 +450,14 @@ services:
 
 - Multiple API server instances behind load balancer
 - Single streamer instance (stateful checkpoint system)
-- ClickHouse cluster for high-availability
+- TimescaleDB cluster for high-availability
 - WebSocket sticky sessions for connection management
 
 **Vertical Scaling**:
 
 - Streamer: CPU-bound (parsing) + Memory (batching)
 - API Server: CPU-bound (concurrent requests)
-- ClickHouse: I/O and Memory intensive
+- TimescaleDB: I/O and Memory intensive
 
 ## Monitoring and Observability
 
@@ -530,8 +470,8 @@ curl http://streamer:8080/health
 # API Server health
 curl http://api-server:3001/api/v1/health
 
-# ClickHouse health
-curl http://clickhouse:8123/ping
+# TimescaleDB health
+psql -h timescaledb -U postgres -d continuum -c "SELECT 1;"
 ```
 
 ### Metrics Collection
@@ -541,7 +481,7 @@ curl http://clickhouse:8123/ping
 - `stream_ticks_received_total` - Ticks processed by streamer
 - `api_requests_total` - API requests by endpoint and status
 - `websocket_connections_active` - Current WebSocket connections
-- `clickhouse_query_duration_seconds` - Database query performance
+- `timescaledb_query_duration_seconds` - Database query performance
 - `batch_size_bytes` - Ingestion batch sizes
 - `checkpoint_lag_seconds` - Recovery point objective
 
@@ -557,7 +497,7 @@ curl http://clickhouse:8123/ping
   "component": "handlers",
   "action": "get_tick",
   "tick_number": 12345,
-  "data_source": "clickhouse",
+  "data_source": "timescaledb",
   "latency_ms": 45,
   "client_ip": "192.168.1.100"
 }
@@ -573,7 +513,7 @@ curl http://clickhouse:8123/ping
    - Checkpoint-based recovery
    - Graceful degradation of API responses
 
-2. **ClickHouse Unavailability**
+2. **TimescaleDB Unavailability**
 
    - Automatic fallback to REST/gRPC
    - Connection pooling with health checks
@@ -622,7 +562,7 @@ LIMIT 10;
 
 ### Data Security
 
-- Encryption at rest for ClickHouse
+- Encryption at rest for TimescaleDB
 - Connection string encryption in configs
 - Audit logging for data access
 - Regular security updates and patches
@@ -656,7 +596,7 @@ make run          # Start streamer (separate terminal)
 go test ./...
 
 # Integration tests
-make test-clickhouse    # Requires ClickHouse instance
+make test-timescaledb    # Requires TimescaleDB instance
 make test-sinks        # Test all sink implementations
 
 # Load testing
@@ -693,7 +633,7 @@ tick-streamer/
 ### Performance Enhancements
 
 - [ ] Parallel batch processing in streamer
-- [ ] Connection pooling for ClickHouse
+- [ ] Connection pooling for TimescaleDB
 - [ ] Query result caching layer
 - [ ] Metrics-based auto-scaling
 

@@ -22,18 +22,26 @@ type Config struct {
 	SequencerClientCert string `env:"SEQUENCER_CLIENT_CERT"` // Path to client certificate (for mTLS)
 	SequencerClientKey  string `env:"SEQUENCER_CLIENT_KEY"`  // Path to client key (for mTLS)
 
-	// ClickHouse connection settings
-	ClickHouseHost     string `env:"CLICKHOUSE_HOST"`
-	ClickHousePort     int    `env:"CLICKHOUSE_PORT"`
-	ClickHouseDatabase string `env:"CLICKHOUSE_DATABASE"`
-	ClickHouseUsername string `env:"CLICKHOUSE_USERNAME"`
-	ClickHousePassword string `env:"CLICKHOUSE_PASSWORD"`
+	// Database sink configuration
+	SinkKind string `env:"SINK_KIND"`
 
 
-	// Batching configuration
-	BatchRowsTx      int           `env:"BATCH_ROWS_TX"`
-	BatchRowsTick    int           `env:"BATCH_ROWS_TICK"`
-	BatchMaxWaitTime time.Duration `env:"BATCH_MAX_WAIT_MS"`
+	// TimescaleDB connection settings
+	TimescaleDBHost       string `env:"TIMESCALEDB_HOST"`
+	TimescaleDBPort       int    `env:"TIMESCALEDB_PORT"`
+	TimescaleDBDatabase   string `env:"TIMESCALEDB_DATABASE"`
+	TimescaleDBUsername   string `env:"TIMESCALEDB_USERNAME"`
+	TimescaleDBPassword   string `env:"TIMESCALEDB_PASSWORD"`
+	TimescaleDBSSLMode    string `env:"TIMESCALEDB_SSL_MODE"`
+
+	// Unified batching configuration
+	BatchSize     int           `env:"BATCH_SIZE"`      // Max rows per batch
+	FlushInterval time.Duration `env:"FLUSH_INTERVAL"` // Max time to wait before flushing
+	
+	// Async processing configuration
+	SinkWorkers   int `env:"SINK_WORKERS"`   // Number of parallel sink workers
+	ChannelBuffer int `env:"CHANNEL_BUFFER"` // Async channel buffer size
+
 
 	// Retry settings
 	RetryBackoffMin time.Duration `env:"RETRY_BACKOFF_MIN_MS"`
@@ -50,10 +58,10 @@ type Config struct {
 	// Debug mode - when enabled, only logs parsed data without persisting
 	DebugMode bool `env:"DEBUG_MODE"`
 
-	// Performance optimization modes
-	StreamingMode    bool `env:"STREAMING_MODE"`    // Direct write mode bypassing batcher
-	LowLatencyMode   bool `env:"LOW_LATENCY_MODE"`   // Enable all low latency optimizations
-	SkipParsing      bool `env:"SKIP_PARSING"`      // Store raw protobuf data
+	// Performance optimization modes (batching now handled at sink level)
+	LowLatencyMode   bool `env:"LOW_LATENCY_MODE"`   // Enable low latency optimizations (reduced logging, etc)
+	SkipValidation   bool `env:"SKIP_VALIDATION"`   // Skip tick validation for ultra-low latency
+	DirectWrite      bool `env:"DIRECT_WRITE"`      // Bypass all batching - immediate database writes
 
 	// Logging
 	LogLevel      string `env:"LOG_LEVEL"`
@@ -91,24 +99,27 @@ func Load() (*Config, error) {
 	cfg.SequencerClientCert = getEnvString("SEQUENCER_CLIENT_CERT", "")
 	cfg.SequencerClientKey = getEnvString("SEQUENCER_CLIENT_KEY", "")
 	
-	// Skip ClickHouse validation in debug mode
-	if !getEnvBool("DEBUG_MODE", false) {
-		if cfg.ClickHouseHost, err = getRequiredEnvString("CLICKHOUSE_HOST"); err != nil {
-			return nil, err
-		}
-		if cfg.ClickHousePassword, err = getRequiredEnvString("CLICKHOUSE_PASSWORD"); err != nil {
-			return nil, err
-		}
-	}
+	// Database sink configuration
+	cfg.SinkKind = getEnvString("SINK_KIND", "debug")
 	
-	cfg.ClickHousePort = getEnvInt("CLICKHOUSE_PORT", 9440)
-	cfg.ClickHouseDatabase = getEnvString("CLICKHOUSE_DATABASE", "default")
-	cfg.ClickHouseUsername = getEnvString("CLICKHOUSE_USERNAME", "default")
 	
-	// Batching and retry configuration
-	cfg.BatchRowsTx = getEnvInt("BATCH_ROWS_TX", 20000)
-	cfg.BatchRowsTick = getEnvInt("BATCH_ROWS_TICK", 1000)
-	cfg.BatchMaxWaitTime = getEnvDuration("BATCH_MAX_WAIT_MS", 100*time.Millisecond)
+	// TimescaleDB configuration
+	cfg.TimescaleDBHost = getEnvString("TIMESCALEDB_HOST", "localhost")
+	cfg.TimescaleDBPort = getEnvInt("TIMESCALEDB_PORT", 5432)
+	cfg.TimescaleDBDatabase = getEnvString("TIMESCALEDB_DATABASE", "postgres")
+	cfg.TimescaleDBUsername = getEnvString("TIMESCALEDB_USERNAME", "postgres")
+	cfg.TimescaleDBPassword = getEnvString("TIMESCALEDB_PASSWORD", "")
+	cfg.TimescaleDBSSLMode = getEnvString("TIMESCALEDB_SSL_MODE", "disable")
+	
+	// Unified batching configuration - Optimized for throughput
+	cfg.BatchSize = getEnvInt("BATCH_SIZE", 2000)         // Larger batches for better throughput
+	cfg.FlushInterval = getEnvDuration("FLUSH_INTERVAL", 200*time.Millisecond)
+	
+	// Async processing configuration
+	cfg.SinkWorkers = getEnvInt("SINK_WORKERS", 8)         // Default 8 parallel workers
+	cfg.ChannelBuffer = getEnvInt("CHANNEL_BUFFER", 10000) // Default 10k tick buffer
+	
+	// Retry configuration
 	cfg.RetryBackoffMin = getEnvDuration("RETRY_BACKOFF_MIN_MS", 200*time.Millisecond)
 	cfg.RetryBackoffMax = getEnvDuration("RETRY_BACKOFF_MAX_MS", 20000*time.Millisecond)
 	
@@ -140,10 +151,10 @@ func Load() (*Config, error) {
 	cfg.Debug = getEnvBool("DEBUG", false)
 	cfg.DebugMode = getEnvBool("DEBUG_MODE", false)
 
-	// Performance optimization settings
-	cfg.StreamingMode = getEnvBool("STREAMING_MODE", false)
-	cfg.LowLatencyMode = getEnvBool("LOW_LATENCY_MODE", false)
-	cfg.SkipParsing = getEnvBool("SKIP_PARSING", false)
+	// Performance optimization settings - Ultra-low latency defaults
+	cfg.LowLatencyMode = getEnvBool("LOW_LATENCY_MODE", true)  // Default to low latency mode
+	cfg.SkipValidation = getEnvBool("SKIP_VALIDATION", true)  // Default to skip validation for speed
+	cfg.DirectWrite = getEnvBool("DIRECT_WRITE", true)       // Default to direct writes for maximum speed
 
 	// Validate required configuration
 	if err := cfg.validate(); err != nil {
@@ -164,27 +175,8 @@ func (c *Config) validate() error {
 		return fmt.Errorf("SEQUENCER_ADDR is required")
 	}
 
-	// Skip ClickHouse validation in debug mode
-	if !c.DebugMode {
-		if c.ClickHouseHost == "" {
-			return fmt.Errorf("CLICKHOUSE_HOST is required")
-		}
-
-		if c.ClickHousePassword == "" {
-			return fmt.Errorf("CLICKHOUSE_PASSWORD is required")
-		}
-
-		if c.ClickHousePort <= 0 {
-			return fmt.Errorf("CLICKHOUSE_PORT must be positive, got: %d", c.ClickHousePort)
-		}
-	}
-
-	if c.BatchRowsTx <= 0 {
-		return fmt.Errorf("BATCH_ROWS_TX must be positive, got: %d", c.BatchRowsTx)
-	}
-
-	if c.BatchRowsTick <= 0 {
-		return fmt.Errorf("BATCH_ROWS_TICK must be positive, got: %d", c.BatchRowsTick)
+	if c.BatchSize <= 0 {
+		return fmt.Errorf("BATCH_SIZE must be positive, got: %d", c.BatchSize)
 	}
 
 	return nil

@@ -15,13 +15,13 @@ STREAMING_MODE=true
 
 **Impact:**
 - Bypasses batcher entirely
-- Direct writes to ClickHouse per tick
+- Direct writes to TimescaleDB per tick
 - **Eliminates 10-20 second batch accumulation delays**
 
 **Architecture Change:**
 ```
-Before: gRPC → Parser → Batcher (waits) → ClickHouse
-After:  gRPC → Parser → Direct Write → ClickHouse
+Before: gRPC → Parser → Batcher (waits) → TimescaleDB
+After:  gRPC → Parser → Direct Write → TimescaleDB
 ```
 
 ### 2. Batch Size Optimization
@@ -38,16 +38,16 @@ BATCH_MAX_WAIT_MS=10        # Was: 100ms (10x faster)
 - Reduced wait times for partial batches
 - Lower memory usage
 
-### 3. ClickHouse Optimizations
+### 3. TimescaleDB Optimizations
 
 **Configuration:**
 ```bash
-CLICKHOUSE_BATCH_SIZE=100     # Was: 10000 (100x smaller)
-CLICKHOUSE_FLUSH_INTERVAL=100ms  # Was: 5s (50x faster)
+TIMESCALEDB_BATCH_SIZE=100     # Was: 10000 (100x smaller)
+TIMESCALEDB_FLUSH_INTERVAL=100ms  # Was: 5s (50x faster)
 ```
 
 **Impact:**
-- Faster ClickHouse batch processing
+- Faster TimescaleDB batch processing
 - Immediate data visibility in database
 - Reduced buffer accumulation time
 
@@ -121,7 +121,7 @@ The system automatically indicates which optimizations are active:
 ### After Optimizations  
 - **Latency**: Sub-second (typically 2-5ms)
 - **Improvement**: **99%+ latency reduction**
-- **Throughput**: Limited only by network and ClickHouse performance
+- **Throughput**: Limited only by network and TimescaleDB performance
 
 ## Configuration Modes
 
@@ -130,7 +130,7 @@ The system automatically indicates which optimizations are active:
 STREAMING_MODE=true
 LOW_LATENCY_MODE=true
 BATCH_MAX_WAIT_MS=5
-CLICKHOUSE_FLUSH_INTERVAL=50ms
+TIMESCALEDB_FLUSH_INTERVAL=50ms
 SKIP_PARSING=false
 ```
 
@@ -141,7 +141,7 @@ SKIP_PARSING=false
 STREAMING_MODE=false
 BATCH_ROWS_TX=10000
 BATCH_MAX_WAIT_MS=1000
-CLICKHOUSE_BATCH_SIZE=50000
+TIMESCALEDB_BATCH_SIZE=50000
 ```
 
 **Use case**: Historical analysis, ETL processes, data warehousing
@@ -185,9 +185,9 @@ Queue depth: >100
 
 **Solutions:**
 1. Ensure `STREAMING_MODE=true`
-2. Verify ClickHouse connectivity
-3. Check network latency to ClickHouse
-4. Monitor ClickHouse resource usage
+2. Verify TimescaleDB connectivity
+3. Check network latency to TimescaleDB
+4. Monitor TimescaleDB resource usage
 
 ### Low Throughput Symptoms
 ```
@@ -213,13 +213,13 @@ Memory usage: >512MB
 ## Hardware Recommendations
 
 ### For Ultra-Low Latency
-- **Network**: Low-latency connection to ClickHouse (<10ms)
+- **Network**: Low-latency connection to TimescaleDB (<10ms)
 - **CPU**: Modern CPU with good single-thread performance
 - **Memory**: 256MB+ for streaming mode
 - **Storage**: SSD not required (minimal local I/O)
 
 ### For High Throughput
-- **Network**: High-bandwidth connection to ClickHouse
+- **Network**: High-bandwidth connection to TimescaleDB
 - **CPU**: Multi-core for concurrent batch processing  
 - **Memory**: 1GB+ for large batch buffering
 - **Storage**: SSD for checkpoint system (if re-enabled)
@@ -227,7 +227,7 @@ Memory usage: >512MB
 ## Future Optimizations
 
 ### Potential Improvements
-1. **Connection Pooling**: Multiple ClickHouse connections
+1. **Connection Pooling**: Multiple TimescaleDB connections
 2. **Compression**: Protocol-level compression for network efficiency
 3. **Batching by Time**: Time-window based batching vs size-based
 4. **SIMD Parsing**: Vectorized protobuf parsing
@@ -249,7 +249,7 @@ Memory usage: >512MB
 
 ### Monitoring
 1. Set up alerts on latency thresholds (>100ms)
-2. Monitor ClickHouse performance separately
+2. Monitor TimescaleDB performance separately
 3. Track error rates and connection stability
 4. Log configuration changes for performance correlation
 

@@ -19,6 +19,21 @@ type ParsedData struct {
 	Metadata map[string]interface{} `json:"metadata,omitempty"`
 }
 
+// RawTransactionData represents a single transaction with its sequence number
+type RawTransactionData struct {
+	SequenceNumber uint64
+	TxBytes        []byte
+}
+
+// RawTickBundle represents a complete tick with pre-serialized data for ultra-low latency
+type RawTickBundle struct {
+	TickNumber       uint64
+	TimestampUS      int64
+	TransactionCount int32
+	TickBytes        []byte
+	Transactions     []RawTransactionData // Transaction bytes with sequence numbers
+}
+
 // Parser defines the interface for parsing protobuf messages into sink-compatible format
 // This enables a plugin architecture where different parsers can be plugged into the system
 type Parser interface {

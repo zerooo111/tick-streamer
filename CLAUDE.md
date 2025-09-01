@@ -70,7 +70,7 @@ type Sink interface {
 ```go
 type Config struct {
     SequencerAddr    string `env:"SEQUENCER_ADDR" default:"localhost:9090"`
-    SinkKind         string `env:"SINK_KIND" default:"clickhouse"`
+    SinkKind         string `env:"SINK_KIND" default:"timescaledb"`
     BatchRowsTx      int    `env:"BATCH_ROWS_TX" default:"100"`        // Optimized for low latency
     StreamingMode    bool   `env:"STREAMING_MODE" default:"true"`      // Direct write mode
     LowLatencyMode   bool   `env:"LOW_LATENCY_MODE" default:"true"`    // Performance optimizations
@@ -86,14 +86,17 @@ type Config struct {
 - Counts rows, simulates latency
 - Perfect for development and load testing
 
-### ClickHouse Adapter (optional)
-**Go Learning**: Database drivers, connection pooling
-- ReplacingMergeTree with versioning
-- Optimized for high-throughput analytics
+### TimescaleDB Adapter
+**Go Learning**: Database drivers, connection pooling, time-series optimizations
+- Hypertables for efficient time-series storage
+- Automatic partitioning and compression
+- Optimized for high-throughput time-series analytics
 
-### PostgreSQL Adapter (optional)
-**Go Learning**: SQL generation, transaction management
-- COPY for bulk inserts, ON CONFLICT for upserts
+### Debug Adapter
+**Go Learning**: Interface implementation, structured logging
+- Logs all data operations without database writes
+- Perfect for development and testing
+- Simulates latency for realistic performance testing
 
 ## Resilience Features
 
@@ -173,7 +176,7 @@ tick-streamer/
 │   ├── streamer/          # Core streaming logic with latency optimizations
 │   ├── parser/            # Pluggable data transformation
 │   ├── batcher/           # Concurrent batching system
-│   ├── sink/              # Database abstraction layer (ClickHouse focus)
+│   ├── sink/              # Database abstraction layer (TimescaleDB focus)
 │   ├── resilience/        # Circuit breakers, retries, health checks
 │   └── validation/        # Tick validation and reorg detection
 ├── proto/                 # gRPC definitions (existing)
@@ -187,7 +190,7 @@ tick-streamer/
 ### ✅ Completed (Production Ready)
 - **Ultra-low latency streaming**: 10-20s → sub-second processing
 - **Dual processing modes**: Traditional batching + Direct streaming
-- **ClickHouse integration**: Optimized for high-throughput analytics
+- **TimescaleDB integration**: Optimized for high-throughput time-series analytics
 - **Resilience patterns**: Circuit breakers, retries, health monitoring
 - **Performance monitoring**: Component-level latency tracking
 - **Configuration system**: Environment-based with validation
@@ -215,7 +218,7 @@ tick-streamer/
 - **Operations**: Single binary deployment, cross-platform builds
 
 ### Why Pluggable Sinks?
-- **Database Agnostic**: Works with ClickHouse, PostgreSQL, or custom stores
+- **Database Agnostic**: Works with TimescaleDB, Debug mode, or custom stores
 - **Testing**: Mock implementation enables comprehensive testing
 - **Evolution**: Easy to add new backends without changing core logic
 

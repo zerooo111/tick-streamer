@@ -9,13 +9,13 @@ import (
 	"log"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"github.com/zerooo111/tick-streamer/internal/batcher"
 	"github.com/zerooo111/tick-streamer/internal/config"
 	"github.com/zerooo111/tick-streamer/internal/parser"
 	"github.com/zerooo111/tick-streamer/internal/resilience"
@@ -24,25 +24,30 @@ import (
 	pb "github.com/zerooo111/tick-streamer/proto"
 )
 
-// Streamer handles the gRPC streaming connection only
-// Phase 5: Now includes resilience patterns and error recovery
+// Streamer handles the gRPC streaming connection with async worker pool processing
+// ARCHITECTURE CHANGE: Async pipeline with parallel workers
 // 
-// LATENCY OPTIMIZATIONS IMPLEMENTED:
-// - StreamingMode: Direct write to sink, bypassing batcher (reduces 10-20s to sub-second)
-// - LowLatencyMode: Disables detailed logging and heavy processing
-// - Configurable batch sizes: BATCH_ROWS_TX=100, BATCH_MAX_WAIT_MS=10
-// - No checkpoint system: Always starts from latest tick (0) for real-time streaming
-// - Raw protobuf storage option: SKIP_PARSING=true for minimal processing
-// - Detailed latency metrics: per-component timing measurements
+// DESIGN:
+// - Stream data at natural gRPC rate and send to buffered channel
+// - Multiple workers process ticks in parallel from the channel
+// - Each worker handles: parse → sink independently
+// - Decouples stream processing from database writes for maximum throughput
 type Streamer struct {
 	config *config.Config
 	client pb.SequencerServiceClient
 	conn   *grpc.ClientConn
 	
-	// Concurrent processing pipeline: stream → parser → batcher → sink
-	parser  parser.Parser
-	sink    sink.Sink
-	batcher *batcher.Batcher
+	// Async pipeline: stream → channel → workers → sink
+	parser     parser.Parser
+	sink       sink.Sink
+	tickChan   chan *pb.Tick  // Buffered channel for async processing
+	workerWg   sync.WaitGroup // Track worker goroutines
+	workerCtx  context.Context
+	workerCancel context.CancelFunc
+	
+	// Monitoring metrics
+	ticksDropped     uint64    // Counter for dropped ticks due to backpressure
+	lastDropTime     time.Time // When we last dropped a tick
 	
 	// Phase 5: Resilience patterns
 	retryConfig      resilience.RetryConfig
@@ -72,7 +77,6 @@ func New(cfg *config.Config) (*Streamer, error) {
 		Settings: map[string]interface{}{
 			"detailed_logging": !cfg.LowLatencyMode, // Disable detailed logging in low latency mode
 			"max_tx_to_log":   3,
-			"skip_parsing":    cfg.SkipParsing,      // Enable fast parsing mode
 		},
 	}
 	
@@ -86,12 +90,13 @@ func New(cfg *config.Config) (*Streamer, error) {
 	if cfg.DebugMode {
 		sinkConfig = sink.Config{
 			Kind:         "debug",
-			MaxBatchSize: cfg.BatchRowsTx, // Use transaction batch size as max
+			MaxBatchSize: cfg.BatchSize,
 		}
 	} else {
 		sinkConfig = sink.Config{
-			Kind:         "clickhouse", // Only ClickHouse is supported for non-debug mode
-			MaxBatchSize: cfg.BatchRowsTx, // Use transaction batch size as max
+			Kind:         cfg.SinkKind,
+			MaxBatchSize: cfg.BatchSize,
+			BatchTimeout: int(cfg.FlushInterval.Milliseconds()),
 		}
 	}
 	
@@ -100,14 +105,9 @@ func New(cfg *config.Config) (*Streamer, error) {
 		return nil, fmt.Errorf("failed to create sink: %w", err)
 	}
 	
-	// Create concurrent batcher for Phase 3
-	// Use the larger of the two batch sizes for the batcher
-	batchSize := cfg.BatchRowsTx
-	if cfg.BatchRowsTick > batchSize {
-		batchSize = cfg.BatchRowsTick
-	}
-	
-	dataBatcher := batcher.New(dataSink, batchSize, cfg.BatchMaxWaitTime)
+	// Initialize async processing channel with buffer
+	tickChan := make(chan *pb.Tick, cfg.ChannelBuffer)
+	workerCtx, workerCancel := context.WithCancel(context.Background())
 	
 	// Phase 5: Initialize resilience patterns
 	retryConfig := resilience.DefaultRetryConfig()
@@ -128,7 +128,9 @@ func New(cfg *config.Config) (*Streamer, error) {
 		config:          cfg,
 		parser:          dataParser,
 		sink:            dataSink,
-		batcher:         dataBatcher,
+		tickChan:        tickChan,
+		workerCtx:       workerCtx,
+		workerCancel:    workerCancel,
 		retryConfig:     retryConfig,
 		circuitBreaker:  circuitBreaker,
 		componentHealth: componentHealth,
@@ -138,7 +140,7 @@ func New(cfg *config.Config) (*Streamer, error) {
 	}, nil
 }
 
-// Start begins the streaming process
+// Start begins the streaming process with async worker pool
 // Always starts from latest tick (0) - no checkpoint system
 func (s *Streamer) Start(ctx context.Context) error {
 	log.Printf("Starting streamer from latest tick, connecting to %s", s.config.SequencerAddr)
@@ -147,15 +149,11 @@ func (s *Streamer) Start(ctx context.Context) error {
 	startTick := uint64(0)
 	s.lastProcessedTick = startTick
 
-	// Start the concurrent batcher only if not in streaming mode
-	if !s.config.StreamingMode && !s.config.LowLatencyMode {
-		if err := s.batcher.Start(ctx); err != nil {
-			return fmt.Errorf("failed to start batcher: %w", err)
-		}
-		log.Printf("🔄 Batcher started for traditional batched processing")
-	} else {
-		log.Printf("🚀 Streaming mode enabled - batcher bypassed for direct writes")
-	}
+	log.Printf("🚀 Async streaming mode - %d workers processing in parallel", s.config.SinkWorkers)
+
+	// Start worker pool before beginning stream
+	s.startWorkerPool()
+	defer s.stopWorkerPool()
 
 	// Connect to gRPC server with retry logic
 	if err := resilience.RetryWithBackoff(ctx, s.retryConfig, func(ctx context.Context, attempt int) error {
@@ -173,17 +171,16 @@ func (s *Streamer) Start(ctx context.Context) error {
 func (s *Streamer) Stop() {
 	log.Println("Stopping streamer...")
 	
-	// Stop batcher first to ensure all pending data is flushed (only if it was started)
-	if s.batcher != nil && !s.config.StreamingMode && !s.config.LowLatencyMode {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		
-		if err := s.batcher.Stop(ctx); err != nil {
-			log.Printf("Error stopping batcher: %v", err)
-		}
-	}
+	// First, stop accepting new ticks by shutting down worker pool
+	s.stopWorkerPool()
 	
-	// No checkpoint system - direct to sink cleanup
+	// Then flush sink to ensure all pending data is persisted
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	
+	if err := s.sink.Flush(ctx); err != nil {
+		log.Printf("Error flushing sink: %v", err)
+	}
 	
 	// Close sink connection
 	if s.sink != nil {
@@ -197,7 +194,145 @@ func (s *Streamer) Stop() {
 		s.conn.Close()
 	}
 	
+	// Print final statistics
+	if s.ticksDropped > 0 {
+		log.Printf("⚠️ Total ticks dropped due to backpressure: %d", s.ticksDropped)
+	}
 	log.Printf("Streamer stopped (last processed tick: %d)", s.lastProcessedTick)
+}
+
+// startWorkerPool launches the configured number of worker goroutines
+func (s *Streamer) startWorkerPool() {
+	log.Printf("🚀 Starting %d sink workers for async processing", s.config.SinkWorkers)
+	log.Printf("📊 Channel buffer: %d ticks", s.config.ChannelBuffer)
+	log.Printf("📦 Batch size: %d rows", s.config.BatchSize)
+	log.Printf("⏱️  Flush interval: %v", s.config.FlushInterval)
+	
+	for i := 0; i < s.config.SinkWorkers; i++ {
+		s.workerWg.Add(1)
+		go s.sinkWorker(i)
+	}
+}
+
+// stopWorkerPool gracefully shuts down all worker goroutines
+func (s *Streamer) stopWorkerPool() {
+	log.Println("Stopping worker pool...")
+	
+	// Cancel worker context to signal shutdown
+	s.workerCancel()
+	
+	// Close channel to signal no more ticks
+	close(s.tickChan)
+	
+	// Wait for all workers to complete
+	s.workerWg.Wait()
+	log.Println("All workers stopped")
+}
+
+// sinkWorker processes ticks from the channel
+func (s *Streamer) sinkWorker(workerID int) {
+	defer s.workerWg.Done()
+	
+	log.Printf("Worker %d started", workerID)
+	
+	for {
+		select {
+		case tick, ok := <-s.tickChan:
+			if !ok {
+				// Channel closed, worker should exit
+				log.Printf("Worker %d shutting down - channel closed", workerID)
+				return
+			}
+			
+			// Process the tick
+			if err := s.processTick(s.workerCtx, tick, workerID); err != nil {
+				if !s.config.LowLatencyMode {
+					log.Printf("Worker %d: Error processing tick %d: %v", workerID, tick.TickNumber, err)
+				}
+				// Continue processing other ticks even if one fails
+			}
+			
+		case <-s.workerCtx.Done():
+			// Context cancelled, worker should exit
+			log.Printf("Worker %d shutting down - context cancelled", workerID)
+			return
+		}
+	}
+}
+
+// processTick handles the full processing pipeline for a single tick
+func (s *Streamer) processTick(ctx context.Context, tick *pb.Tick, workerID int) error {
+	processStartTime := time.Now()
+	
+	// Phase 5: Optional validation (configurable for performance)
+	if !s.config.SkipValidation {
+		validationResult := s.tickValidator.ValidateTick(ctx, tick)
+		if !validationResult.IsValid {
+			if s.hasCriticalValidationErrors(validationResult.Errors) {
+				return fmt.Errorf("critical validation errors in tick %d: %v", tick.TickNumber, validationResult.Errors)
+			}
+			if !s.config.LowLatencyMode {
+				log.Printf("⚠️ Validation warnings for tick %d: %v", tick.TickNumber, validationResult.Errors)
+			}
+		}
+
+		// Phase 5: Check for blockchain reorganizations (only when not skipping)
+		reorgEvent, err := s.reorgDetector.CheckForReorg(tick)
+		if err != nil && !s.config.LowLatencyMode {
+			log.Printf("⚠️ Worker %d: Error checking for reorg in tick %d: %v", workerID, tick.TickNumber, err)
+		}
+		if reorgEvent != nil {
+			if err := s.handleReorganization(ctx, reorgEvent); err != nil && !s.config.LowLatencyMode {
+				log.Printf("❌ Worker %d: Failed to handle reorganization for tick %d: %v", workerID, tick.TickNumber, err)
+				// Don't fail processing for reorg handling errors, just log them
+			}
+		}
+	}
+	
+	// Use parser plugin to transform protobuf tick to sink-compatible data
+	parseStartTime := time.Now()
+	parsedData, err := s.parser.ParseTick(ctx, tick)
+	if err != nil {
+		return fmt.Errorf("failed to parse tick %d: %w", tick.TickNumber, err)
+	}
+	parseLatency := time.Since(parseStartTime)
+	
+	// Send parsed data directly to sink - let sink handle batching logic
+	if len(parsedData) > 0 {
+		sinkStartTime := time.Now()
+		if err := s.sink.PersistData(ctx, parsedData); err != nil {
+			return fmt.Errorf("failed to persist data for tick %d: %w", tick.TickNumber, err)
+		}
+		sinkLatency := time.Since(sinkStartTime)
+		
+		// Skip all logging in low latency mode for maximum performance
+		if !s.config.LowLatencyMode {
+			totalLatency := time.Since(processStartTime)
+			log.Printf("⏱️  Worker %d: Tick #%d latency: parse=%v, sink=%v, total=%v", 
+				workerID,
+				tick.TickNumber, 
+				parseLatency.Truncate(time.Microsecond),
+				sinkLatency.Truncate(time.Microsecond), 
+				totalLatency.Truncate(time.Microsecond))
+		}
+	}
+	
+	// Update last processed tick (thread-safe with atomic operations would be better)
+	s.lastProcessedTick = tick.TickNumber
+	
+	return nil
+}
+
+// GetAsyncStats returns async processing statistics
+func (s *Streamer) GetAsyncStats() map[string]interface{} {
+	return map[string]interface{}{
+		"channel_depth":    len(s.tickChan),
+		"channel_capacity": cap(s.tickChan),
+		"channel_usage":    float64(len(s.tickChan)) / float64(cap(s.tickChan)) * 100,
+		"worker_count":     s.config.SinkWorkers,
+		"ticks_dropped":    s.ticksDropped,
+		"last_drop_time":   s.lastDropTime,
+	}
 }
 
 // connect establishes the gRPC connection
@@ -376,38 +511,35 @@ func (s *Streamer) attemptStreaming(ctx context.Context, startTick uint64) error
 				return fmt.Errorf("stream receive error: %w", err)
 			}
 
-			// Process the tick with circuit breaker protection
-			err = s.circuitBreaker.Execute(ctx, func() error {
-				return s.processTick(ctx, tick)
-			}, "tick processing")
-			
-			if err != nil {
-				// Enhanced error logging with circuit breaker context
-				if strings.Contains(err.Error(), "circuit breaker open") {
-					stats := s.circuitBreaker.GetStats()
-					resetTime := s.circuitBreaker.GetNextResetTime()
-					timeUntilReset := time.Until(resetTime)
-					
-					// Provide comprehensive circuit breaker diagnostics
-					log.Printf("⚠️ Error processing tick %d: %v", tick.TickNumber, err)
-					log.Printf("🔴 Circuit Breaker Status: OPEN - consecutive failures: %d/%d, last failure: %v ago", 
-						stats.CurrentFailures, stats.FailureThreshold, time.Since(stats.LastFailureTime).Truncate(time.Second))
-					if !resetTime.IsZero() {
-						log.Printf("🕐 Circuit will attempt reset in: %v (at %s)", 
-							timeUntilReset.Truncate(time.Second), resetTime.Format("15:04:05"))
+			// Async processing: Send tick to worker channel
+			select {
+			case s.tickChan <- tick:
+				// Tick sent successfully to worker pool
+				if !s.config.LowLatencyMode {
+					channelDepth := len(s.tickChan)
+					if tick.TickNumber%100 == 0 { // Log every 100th tick
+						log.Printf("📤 Tick %d queued (channel: %d/%d, %.1f%% full)", 
+							tick.TickNumber, channelDepth, cap(s.tickChan), 
+							float64(channelDepth)/float64(cap(s.tickChan))*100)
 					}
-					log.Printf("📊 Overall stats: %d total requests, %d successes, %d failures", 
-						stats.TotalRequests, stats.SuccessCount, stats.FailureCount)
-				} else {
-					log.Printf("⚠️ Error processing tick %d: %v", tick.TickNumber, err)
 				}
-				// For critical errors, we might want to fail the stream
-				// For non-critical errors, we continue processing
-				if s.isCriticalError(err) {
-					return fmt.Errorf("critical error processing tick %d: %w", tick.TickNumber, err)
-				}
-				// Continue processing for non-critical errors
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+				// Channel is full - implement backpressure handling
+				s.ticksDropped++
+				s.lastDropTime = time.Now()
+				
+				channelDepth := len(s.tickChan)
+				log.Printf("⚠️ Tick channel full (%d/%d), dropping tick %d (backpressure) - total dropped: %d", 
+					channelDepth, cap(s.tickChan), tick.TickNumber, s.ticksDropped)
+				// In high-throughput scenarios, we may need to drop ticks or block
+				// For now, we'll drop the tick to avoid blocking the stream
 			}
+			
+			// Old synchronous processing removed - now handled by worker pool
+			continue
+			
 		}
 	}
 }
@@ -482,96 +614,6 @@ func containsIgnoreCase(s, substr string) bool {
 		    (len(sLower) > len(substrLower) && 
 		     (strings.HasPrefix(sLower, substrLower) || 
 		      strings.Contains(sLower, substrLower))))
-}
-
-// processTick handles a single tick using the concurrent processing pipeline
-// Phase 5: Now includes validation, reorg detection, and resilience patterns
-func (s *Streamer) processTick(ctx context.Context, tick *pb.Tick) error {
-	processStartTime := time.Now()
-	s.ticksReceived++
-	s.lastTickTime = time.Now()
-	
-	// Phase 5: Validate the tick data for corruption
-	validationResult := s.tickValidator.ValidateTick(ctx, tick)
-	if !validationResult.IsValid {
-		// Log validation errors but decide whether to reject or continue
-		for _, validationError := range validationResult.Errors {
-			log.Printf("❌ Validation error in tick %d: %s", tick.TickNumber, validationError.Error())
-		}
-		
-		// For critical validation failures, reject the tick
-		if s.hasCriticalValidationErrors(validationResult.Errors) {
-			return fmt.Errorf("critical validation failure for tick %d", tick.TickNumber)
-		}
-		
-		// For non-critical errors, log and continue
-		log.Printf("⚠️ Non-critical validation issues in tick %d, continuing processing", tick.TickNumber)
-	}
-	
-	// Phase 5: Check for blockchain reorganizations
-	reorgEvent, err := s.reorgDetector.CheckForReorg(tick)
-	if err != nil {
-		log.Printf("⚠️ Error checking for reorg in tick %d: %v", tick.TickNumber, err)
-	}
-	if reorgEvent != nil {
-		if err := s.handleReorganization(ctx, reorgEvent); err != nil {
-			log.Printf("❌ Failed to handle reorganization for tick %d: %v", tick.TickNumber, err)
-			// Don't fail processing for reorg handling errors, just log them
-		}
-	}
-	
-	// Use parser plugin to transform protobuf tick to sink-compatible data
-	parseStartTime := time.Now()
-	parsedData, err := s.parser.ParseTick(ctx, tick)
-	if err != nil {
-		return fmt.Errorf("failed to parse tick %d: %w", tick.TickNumber, err)
-	}
-	parseLatency := time.Since(parseStartTime)
-	
-	// Choose processing path based on configuration
-	if s.config.StreamingMode || s.config.LowLatencyMode {
-		// Only process and log if we have data (skip empty ticks)
-		if len(parsedData) > 0 {
-			// Direct write mode - bypass batcher for minimal latency
-			sinkStartTime := time.Now()
-			if err := s.sink.PersistData(ctx, parsedData); err != nil {
-				return fmt.Errorf("failed to persist data directly for tick %d: %w", tick.TickNumber, err)
-			}
-			
-			// Immediate flush in streaming mode
-			if err := s.sink.Flush(ctx); err != nil {
-				return fmt.Errorf("failed to flush data for tick %d: %w", tick.TickNumber, err)
-			}
-			sinkLatency := time.Since(sinkStartTime)
-			
-			// Log detailed latency breakdown for optimization
-			totalLatency := time.Since(processStartTime)
-			log.Printf("⏱️  Tick #%d latency breakdown: parse=%v, sink=%v, total=%v", 
-				tick.TickNumber, 
-				parseLatency.Truncate(time.Microsecond),
-				sinkLatency.Truncate(time.Microsecond), 
-				totalLatency.Truncate(time.Microsecond))
-		}
-	} else {
-		// Traditional batched mode
-		for _, data := range parsedData {
-			if data == nil {
-				continue
-			}
-			
-			// Add to batcher - batcher now handles sophisticated backpressure and retries
-			if err := s.batcher.Add(ctx, data); err != nil {
-				// Batcher's internal retry mechanisms have been exhausted
-				return fmt.Errorf("failed to add data to batcher for tick %d: %w", tick.TickNumber, err)
-			}
-		}
-	}
-	
-	// Update last processed tick for checkpoint system
-	s.lastProcessedTick = tick.TickNumber
-	
-
-	return nil
 }
 
 

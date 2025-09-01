@@ -8,7 +8,7 @@ help:
 	@echo "Continuum Streamer - Available Commands:"
 	@echo ""
 	@echo "Development:"
-	@echo "  make run-streamer   - Run the ClickHouse streamer from source"
+	@echo "  make run-streamer   - Run the streamer from source"
 	@echo "  make run-debug      - Run streamer in debug mode (logs only, no DB)"
 	@echo "  make run-api-server - Run the API server from source" 
 	@echo "  make build          - Build both binaries to bin/"
@@ -27,13 +27,13 @@ help:
 	@echo ""
 	@echo "Examples:"
 	@echo "  make setup-env && vim .env    # Setup and configure environment"
-	@echo "  make run-streamer             # Run ClickHouse streamer"
+	@echo "  make run-streamer             # Run streamer"
 	@echo "  make run-debug                # Debug mode - see parsed data without DB"
 	@echo "  make run-api-server           # Run API server"
 
-# Run the ClickHouse streamer from source
+# Run the streamer from source
 run-streamer:
-	@echo "🚀 Starting ClickHouse streamer..."
+	@echo "🚀 Starting streamer..."
 	@echo "📋 Loading configuration from .env file..."
 	@if [ ! -f ".env" ]; then \
 		echo "❌ .env file not found. Run 'make setup-env' first"; \
@@ -117,5 +117,5 @@ setup-env:
 	else \
 		cp .env.example .env; \
 		echo "✅ Copied .env.example to .env"; \
-		echo "📝 Edit .env with your ClickHouse credentials"; \
+		echo "📝 Edit .env with your database credentials"; \
 	fi

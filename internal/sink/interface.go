@@ -66,8 +66,8 @@ type StatsProvider interface {
 // Config holds sink configuration parameters
 // This demonstrates Go's approach to configuration structs
 type Config struct {
-	// Connection settings - only ClickHouse supported
-	Kind string `json:"kind" env:"SINK_KIND"` // Only "clickhouse" supported
+	// Connection settings - supports "timescaledb", "debug"
+	Kind string `json:"kind" env:"SINK_KIND"`
 	
 	// Performance tuning
 	MaxBatchSize     int `json:"max_batch_size" env:"SINK_MAX_BATCH_SIZE"`
@@ -86,8 +86,8 @@ type Config struct {
 // NewSink creates a sink instance based on configuration
 func NewSink(cfg Config) (Sink, error) {
 	switch cfg.Kind {
-	case "clickhouse", "ch":
-		return NewClickHouseSink(cfg)
+	case "timescaledb", "tsdb", "postgres":
+		return NewTimescaleDBSink(cfg)
 	case "debug":
 		return NewDebugSink(cfg)
 	default:
@@ -102,11 +102,11 @@ func NewStatsProviderSink(cfg Config) (StatsProvider, error) {
 		return nil, err
 	}
 	
-	// ClickHouse sink already implements StatsProvider
+	// TimescaleDB sinks already implement StatsProvider
 	if statsSink, ok := baseSink.(StatsProvider); ok {
 		return statsSink, nil
 	}
 	
-	// This shouldn't happen with ClickHouse, but kept for safety
+	// This shouldn't happen with TimescaleDB, but kept for safety
 	return NewStatsWrapper(baseSink), nil
 }
