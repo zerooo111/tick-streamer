@@ -1,3 +1,19 @@
+// Package sink implements database persistence layers for the Continuum Streamer.
+// The TimescaleDB sink provides high-performance time-series data storage
+// optimized for blockchain tick and transaction data.
+//
+// TimescaleDB Features Used:
+// - Hypertables for automatic time-based partitioning
+// - Batch inserts for maximum throughput
+// - UPSERT operations for handling reorgs
+// - Connection pooling for concurrency
+// - Compression policies for storage efficiency
+//
+// Performance Optimizations:
+// - Prepared statements for repeated queries
+// - Batch operations to reduce roundtrips
+// - Asynchronous processing with worker pools
+// - Smart batching based on size and time thresholds
 package sink
 
 import (

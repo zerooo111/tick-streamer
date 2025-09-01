@@ -1,3 +1,17 @@
+// Package parser provides a pluggable data transformation system for the Continuum Streamer.
+// It converts raw protobuf tick data into sink-compatible formats with support for
+// different parsing strategies and performance optimizations.
+//
+// Key Features:
+// - Pluggable architecture: Support for different parser implementations
+// - Performance optimization: Optional raw protobuf passthrough
+// - Error handling: Graceful handling of malformed data
+// - Extensible: Easy to add new parser types
+//
+// Parser Types:
+// - "tick": Standard tick parser with full data transformation
+// - "raw": Minimal parser for ultra-low latency (future)
+// - "custom": User-defined parsers (future)
 package parser
 
 import (

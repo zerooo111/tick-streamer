@@ -1,3 +1,9 @@
+// Package models defines the core data structures for blockchain tick data.
+// These models are optimized for TimescaleDB time-series storage and provide
+// efficient representation of blockchain state transitions.
+//
+// TickRow represents a single blockchain tick (block) with all associated
+// metadata needed for time-series analysis and blockchain state tracking.
 package models
 
 import (

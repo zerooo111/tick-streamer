@@ -1,3 +1,12 @@
+// Package models defines the data structures for the Continuum Streamer.
+// These models represent blockchain transactions with optimized storage formats
+// for TimescaleDB time-series database operations.
+//
+// Key Design Principles:
+// - Efficient storage: Proper column types and indexing strategies
+// - JSON serialization: Clean API responses
+// - Database mapping: Struct tags for ORM integration
+// - Version support: Handles blockchain reorganizations
 package models
 
 import (
