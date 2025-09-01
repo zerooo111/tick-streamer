@@ -220,14 +220,19 @@ func (r *TimescaleDBRepository) GetRecentTransactions(ctx context.Context, limit
 		return nil, fmt.Errorf("TimescaleDB connection not available")
 	}
 	
+	// Ultra-fast single column ordering - processed_at is indexed for time-series
 	query := `
 		SELECT tick_number, sequence_number, timestamp_us, processed_at, raw_data
 		FROM raw_transactions 
 		WHERE version > 0
-		ORDER BY processed_at DESC, tick_number DESC, sequence_number DESC
+		ORDER BY processed_at DESC
 		LIMIT $1`
 	
-	rows, err := r.db.QueryContext(ctx, query, limit)
+	// Add query timeout for faster failure detection
+	queryCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+	
+	rows, err := r.db.QueryContext(queryCtx, query, limit)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query recent transactions: %w", err)
 	}

@@ -87,12 +87,18 @@ func New(cfg *config.Config) (*Streamer, error) {
 	
 	// Create sink based on configuration
 	var sinkConfig sink.Config
+	log.Printf("🔍 Configuration Debug:")
+	log.Printf("  - cfg.DebugMode: %v", cfg.DebugMode)
+	log.Printf("  - cfg.SinkKind: '%s'", cfg.SinkKind)
+	
 	if cfg.DebugMode {
+		log.Printf("📋 Using DEBUG_MODE=true -> Debug Sink")
 		sinkConfig = sink.Config{
 			Kind:         "debug",
 			MaxBatchSize: cfg.BatchSize,
 		}
 	} else {
+		log.Printf("📋 Using SINK_KIND='%s' -> %s Sink", cfg.SinkKind, strings.ToUpper(cfg.SinkKind))
 		sinkConfig = sink.Config{
 			Kind:         cfg.SinkKind,
 			MaxBatchSize: cfg.BatchSize,
@@ -100,10 +106,12 @@ func New(cfg *config.Config) (*Streamer, error) {
 		}
 	}
 	
+	log.Printf("🏗️  Creating sink with Kind='%s'", sinkConfig.Kind)
 	dataSink, err := sink.NewSink(sinkConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create sink: %w", err)
 	}
+	log.Printf("✅ Sink created successfully")
 	
 	// Initialize async processing channel with buffer
 	tickChan := make(chan *pb.Tick, cfg.ChannelBuffer)
@@ -511,30 +519,52 @@ func (s *Streamer) attemptStreaming(ctx context.Context, startTick uint64) error
 				return fmt.Errorf("stream receive error: %w", err)
 			}
 
-			// Async processing: Send tick to worker channel
-			select {
-			case s.tickChan <- tick:
-				// Tick sent successfully to worker pool
-				if !s.config.LowLatencyMode {
-					channelDepth := len(s.tickChan)
-					if tick.TickNumber%100 == 0 { // Log every 100th tick
-						log.Printf("📤 Tick %d queued (channel: %d/%d, %.1f%% full)", 
-							tick.TickNumber, channelDepth, cap(s.tickChan), 
-							float64(channelDepth)/float64(cap(s.tickChan))*100)
+			// Async processing: Send tick to worker channel with intelligent backpressure
+			channelUsage := float64(len(s.tickChan)) / float64(cap(s.tickChan)) * 100
+			
+			// If channel is getting full, try harder to avoid dropping
+			if channelUsage > 90 {
+				// Use blocking send for high-priority scenarios to avoid data loss
+				select {
+				case s.tickChan <- tick:
+					// Successfully queued even though channel was nearly full
+					if !s.config.LowLatencyMode {
+						log.Printf("⚠️ HIGH PRESSURE: Tick %d queued (channel: %.1f%% full)", 
+							tick.TickNumber, channelUsage)
+					}
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(10 * time.Millisecond):
+					// Only drop after trying to send for 10ms
+					s.ticksDropped++
+					s.lastDropTime = time.Now()
+					
+					if s.ticksDropped%100 == 0 { // Log every 100 drops to reduce spam
+						log.Printf("🔴 CRITICAL: Channel blocked for >10ms, dropping tick %d - total dropped: %d", 
+							tick.TickNumber, s.ticksDropped)
 					}
 				}
-			case <-ctx.Done():
-				return ctx.Err()
-			default:
-				// Channel is full - implement backpressure handling
-				s.ticksDropped++
-				s.lastDropTime = time.Now()
-				
-				channelDepth := len(s.tickChan)
-				log.Printf("⚠️ Tick channel full (%d/%d), dropping tick %d (backpressure) - total dropped: %d", 
-					channelDepth, cap(s.tickChan), tick.TickNumber, s.ticksDropped)
-				// In high-throughput scenarios, we may need to drop ticks or block
-				// For now, we'll drop the tick to avoid blocking the stream
+			} else {
+				// Normal operation - non-blocking send
+				select {
+				case s.tickChan <- tick:
+					// Tick sent successfully to worker pool
+					if !s.config.LowLatencyMode && tick.TickNumber%200 == 0 {
+						log.Printf("📤 Tick %d queued (channel: %.1f%% full)", 
+							tick.TickNumber, channelUsage)
+					}
+				case <-ctx.Done():
+					return ctx.Err()
+				default:
+					// Channel is full - this should be rare with better sizing
+					s.ticksDropped++
+					s.lastDropTime = time.Now()
+					
+					if s.ticksDropped%50 == 0 { // Log every 50 drops
+						log.Printf("⚠️ Channel full, dropping tick %d - total dropped: %d", 
+							tick.TickNumber, s.ticksDropped)
+					}
+				}
 			}
 			
 			// Old synchronous processing removed - now handled by worker pool
