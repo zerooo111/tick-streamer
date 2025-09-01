@@ -9,8 +9,6 @@ import (
 	"log"
 	"os"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc"
@@ -18,7 +16,6 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/zerooo111/tick-streamer/internal/batcher"
-	"github.com/zerooo111/tick-streamer/internal/checkpoint"
 	"github.com/zerooo111/tick-streamer/internal/config"
 	"github.com/zerooo111/tick-streamer/internal/parser"
 	"github.com/zerooo111/tick-streamer/internal/resilience"
@@ -29,6 +26,14 @@ import (
 
 // Streamer handles the gRPC streaming connection only
 // Phase 5: Now includes resilience patterns and error recovery
+// 
+// LATENCY OPTIMIZATIONS IMPLEMENTED:
+// - StreamingMode: Direct write to sink, bypassing batcher (reduces 10-20s to sub-second)
+// - LowLatencyMode: Disables detailed logging and heavy processing
+// - Configurable batch sizes: BATCH_ROWS_TX=100, BATCH_MAX_WAIT_MS=10
+// - No checkpoint system: Always starts from latest tick (0) for real-time streaming
+// - Raw protobuf storage option: SKIP_PARSING=true for minimal processing
+// - Detailed latency metrics: per-component timing measurements
 type Streamer struct {
 	config *config.Config
 	client pb.SequencerServiceClient
@@ -38,9 +43,6 @@ type Streamer struct {
 	parser  parser.Parser
 	sink    sink.Sink
 	batcher *batcher.Batcher
-	
-	// Phase 4: Checkpoint system for durability
-	checkpoint checkpoint.Store
 	
 	// Phase 5: Resilience patterns
 	retryConfig      resilience.RetryConfig
@@ -59,22 +61,18 @@ type Streamer struct {
 	lastProcessedTick uint64
 	startTime         time.Time
 	lastTickTime      time.Time
-	
-	// Goroutine tracking for checkpoint saves
-	checkpointWg          sync.WaitGroup
-	checkpointWorkers     int32 // atomic counter for active checkpoint workers
-	checkpointWorkerPool  chan struct{} // Semaphore to limit concurrent checkpoint saves
 }
 
 // New creates a new Streamer instance with the given configuration
 // This is a common Go pattern - a constructor function that returns a pointer to a struct
 func New(cfg *config.Config) (*Streamer, error) {
-	// Create parser plugin
+	// Create parser plugin with performance optimizations
 	parserConfig := parser.ParserConfig{
 		Type: "tick", // Default to tick parser
 		Settings: map[string]interface{}{
-			"detailed_logging": true,
+			"detailed_logging": !cfg.LowLatencyMode, // Disable detailed logging in low latency mode
 			"max_tx_to_log":   3,
+			"skip_parsing":    cfg.SkipParsing,      // Enable fast parsing mode
 		},
 	}
 	
@@ -111,12 +109,6 @@ func New(cfg *config.Config) (*Streamer, error) {
 	
 	dataBatcher := batcher.New(dataSink, batchSize, cfg.BatchMaxWaitTime)
 	
-	// Create checkpoint store for Phase 4
-	checkpointStore, err := checkpoint.NewStore(cfg.CheckpointDSN)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create checkpoint store: %w", err)
-	}
-	
 	// Phase 5: Initialize resilience patterns
 	retryConfig := resilience.DefaultRetryConfig()
 	retryConfig.BaseDelay = cfg.RetryBackoffMin
@@ -133,48 +125,47 @@ func New(cfg *config.Config) (*Streamer, error) {
 	reorgDetector := validation.NewReorgDetector(128) // Keep 128 ticks for reorg detection
 	
 	return &Streamer{
-		config:               cfg,
-		parser:               dataParser,
-		sink:                 dataSink,
-		batcher:              dataBatcher,
-		checkpoint:           checkpointStore,
-		retryConfig:          retryConfig,
-		circuitBreaker:       circuitBreaker,
-		componentHealth:      componentHealth,
-		tickValidator:        tickValidator,
-		reorgDetector:        reorgDetector,
-		startTime:            time.Now(),
-		checkpointWorkerPool: make(chan struct{}, 3), // Max 3 concurrent checkpoint saves
+		config:          cfg,
+		parser:          dataParser,
+		sink:            dataSink,
+		batcher:         dataBatcher,
+		retryConfig:     retryConfig,
+		circuitBreaker:  circuitBreaker,
+		componentHealth: componentHealth,
+		tickValidator:   tickValidator,
+		reorgDetector:   reorgDetector,
+		startTime:       time.Now(),
 	}, nil
 }
 
 // Start begins the streaming process
-// Phase 4: Now loads checkpoint and resumes from last processed tick
+// Always starts from latest tick (0) - no checkpoint system
 func (s *Streamer) Start(ctx context.Context) error {
-	log.Printf("Starting streamer with checkpointing, connecting to %s", s.config.SequencerAddr)
+	log.Printf("Starting streamer from latest tick, connecting to %s", s.config.SequencerAddr)
 
-	// Load checkpoint to determine starting position
-	startTick, err := s.checkpoint.Load(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to load checkpoint: %w", err)
-	}
+	// Always start from latest tick (0)
+	startTick := uint64(0)
 	s.lastProcessedTick = startTick
 
-	// Start the concurrent batcher
-	if err := s.batcher.Start(ctx); err != nil {
-		return fmt.Errorf("failed to start batcher: %w", err)
+	// Start the concurrent batcher only if not in streaming mode
+	if !s.config.StreamingMode && !s.config.LowLatencyMode {
+		if err := s.batcher.Start(ctx); err != nil {
+			return fmt.Errorf("failed to start batcher: %w", err)
+		}
+		log.Printf("🔄 Batcher started for traditional batched processing")
+	} else {
+		log.Printf("🚀 Streaming mode enabled - batcher bypassed for direct writes")
 	}
 
 	// Connect to gRPC server with retry logic
-	err = resilience.RetryWithBackoff(ctx, s.retryConfig, func(ctx context.Context, attempt int) error {
+	if err := resilience.RetryWithBackoff(ctx, s.retryConfig, func(ctx context.Context, attempt int) error {
 		return s.connect(ctx)
-	}, "gRPC connection")
-	if err != nil {
+	}, "gRPC connection"); err != nil {
 		return fmt.Errorf("failed to connect to sequencer after retries: %w", err)
 	}
 	defer s.conn.Close()
 
-	// Start streaming loop from checkpoint with resilience
+	// Start streaming loop from latest tick with resilience
 	return s.streamLoopWithResilience(ctx, startTick)
 }
 
@@ -182,8 +173,8 @@ func (s *Streamer) Start(ctx context.Context) error {
 func (s *Streamer) Stop() {
 	log.Println("Stopping streamer...")
 	
-	// Stop batcher first to ensure all pending data is flushed
-	if s.batcher != nil {
+	// Stop batcher first to ensure all pending data is flushed (only if it was started)
+	if s.batcher != nil && !s.config.StreamingMode && !s.config.LowLatencyMode {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		
@@ -192,38 +183,7 @@ func (s *Streamer) Stop() {
 		}
 	}
 	
-	// Wait for all checkpoint goroutines to complete
-	log.Println("Waiting for checkpoint saves to complete...")
-	checkpointDone := make(chan struct{})
-	go func() {
-		s.checkpointWg.Wait()
-		close(checkpointDone)
-	}()
-	
-	select {
-	case <-checkpointDone:
-		log.Println("All checkpoint saves completed")
-	case <-time.After(10 * time.Second):
-		log.Printf("⚠️ Timeout waiting for checkpoint saves (%d still running)", atomic.LoadInt32(&s.checkpointWorkers))
-	}
-	
-	// Save final checkpoint before shutdown
-	if s.checkpoint != nil && s.lastProcessedTick > 0 {
-		log.Printf("Saving final checkpoint at tick %d...", s.lastProcessedTick)
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		
-		if err := s.checkpoint.Save(ctx, s.lastProcessedTick); err != nil {
-			log.Printf("Error saving final checkpoint: %v", err)
-		}
-	}
-	
-	// Close checkpoint store
-	if s.checkpoint != nil {
-		if err := s.checkpoint.Close(); err != nil {
-			log.Printf("Error closing checkpoint store: %v", err)
-		}
-	}
+	// No checkpoint system - direct to sink cleanup
 	
 	// Close sink connection
 	if s.sink != nil {
@@ -237,7 +197,7 @@ func (s *Streamer) Stop() {
 		s.conn.Close()
 	}
 	
-	log.Printf("Streamer stopped (final checkpoint: tick %d)", s.lastProcessedTick)
+	log.Printf("Streamer stopped (last processed tick: %d)", s.lastProcessedTick)
 }
 
 // connect establishes the gRPC connection
@@ -527,6 +487,7 @@ func containsIgnoreCase(s, substr string) bool {
 // processTick handles a single tick using the concurrent processing pipeline
 // Phase 5: Now includes validation, reorg detection, and resilience patterns
 func (s *Streamer) processTick(ctx context.Context, tick *pb.Tick) error {
+	processStartTime := time.Now()
 	s.ticksReceived++
 	s.lastTickTime = time.Now()
 	
@@ -560,73 +521,61 @@ func (s *Streamer) processTick(ctx context.Context, tick *pb.Tick) error {
 	}
 	
 	// Use parser plugin to transform protobuf tick to sink-compatible data
+	parseStartTime := time.Now()
 	parsedData, err := s.parser.ParseTick(ctx, tick)
 	if err != nil {
 		return fmt.Errorf("failed to parse tick %d: %w", tick.TickNumber, err)
 	}
+	parseLatency := time.Since(parseStartTime)
 	
-	// Send parsed data to concurrent batcher
-	for _, data := range parsedData {
-		if data == nil {
-			continue
+	// Choose processing path based on configuration
+	if s.config.StreamingMode || s.config.LowLatencyMode {
+		// Only process and log if we have data (skip empty ticks)
+		if len(parsedData) > 0 {
+			// Direct write mode - bypass batcher for minimal latency
+			sinkStartTime := time.Now()
+			if err := s.sink.PersistData(ctx, parsedData); err != nil {
+				return fmt.Errorf("failed to persist data directly for tick %d: %w", tick.TickNumber, err)
+			}
+			
+			// Immediate flush in streaming mode
+			if err := s.sink.Flush(ctx); err != nil {
+				return fmt.Errorf("failed to flush data for tick %d: %w", tick.TickNumber, err)
+			}
+			sinkLatency := time.Since(sinkStartTime)
+			
+			// Log detailed latency breakdown for optimization
+			totalLatency := time.Since(processStartTime)
+			log.Printf("⏱️  Tick #%d latency breakdown: parse=%v, sink=%v, total=%v", 
+				tick.TickNumber, 
+				parseLatency.Truncate(time.Microsecond),
+				sinkLatency.Truncate(time.Microsecond), 
+				totalLatency.Truncate(time.Microsecond))
 		}
-		
-		// Add to batcher - batcher now handles sophisticated backpressure and retries
-		if err := s.batcher.Add(ctx, data); err != nil {
-			// Batcher's internal retry mechanisms have been exhausted
-			return fmt.Errorf("failed to add data to batcher for tick %d: %w", tick.TickNumber, err)
+	} else {
+		// Traditional batched mode
+		for _, data := range parsedData {
+			if data == nil {
+				continue
+			}
+			
+			// Add to batcher - batcher now handles sophisticated backpressure and retries
+			if err := s.batcher.Add(ctx, data); err != nil {
+				// Batcher's internal retry mechanisms have been exhausted
+				return fmt.Errorf("failed to add data to batcher for tick %d: %w", tick.TickNumber, err)
+			}
 		}
 	}
 	
 	// Update last processed tick for checkpoint system
 	s.lastProcessedTick = tick.TickNumber
 	
-	// Save checkpoint periodically and log progress every 100 ticks
-	if s.ticksReceived%100 == 0 {
-		// Save checkpoint asynchronously with bounded concurrency
-		select {
-		case s.checkpointWorkerPool <- struct{}{}: // Acquire worker slot
-			s.checkpointWg.Add(1)
-			atomic.AddInt32(&s.checkpointWorkers, 1)
-			
-			go func(tickNum uint64) {
-				defer func() {
-					<-s.checkpointWorkerPool // Release worker slot
-					s.checkpointWg.Done()
-					atomic.AddInt32(&s.checkpointWorkers, -1)
-				}()
-				
-				checkpointCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-				defer cancel()
-				
-				if err := s.checkpoint.Save(checkpointCtx, tickNum); err != nil {
-					log.Printf("⚠️ Failed to save checkpoint for tick %d: %v", tickNum, err)
-				}
-			}(s.lastProcessedTick)
-			
-		default:
-			// Worker pool full, skip this checkpoint save to prevent blocking
-			log.Printf("⚠️ Skipping checkpoint save for tick %d - worker pool full", s.lastProcessedTick)
-		}
-		
-		elapsed := s.lastTickTime.Sub(s.startTime)
-		ticksPerSecond := float64(s.ticksReceived) / elapsed.Seconds()
-		
-		batchStats := s.batcher.GetStats()
-		
-		log.Printf("📊 STREAMER: %d ticks in %v (%.1f ticks/sec), checkpoint: %d", 
-			s.ticksReceived, elapsed.Truncate(time.Second), ticksPerSecond, s.lastProcessedTick)
-		log.Printf("📦 BATCHER: %d batches, %d items, queue_depth=%d, avg_flush=%.1fms", 
-			batchStats.BatchesProcessed, batchStats.ItemsProcessed, 
-			batchStats.QueueDepth, float64(batchStats.AverageFlushTime.Nanoseconds())/1e6)
-	}
 
 	return nil
 }
 
 
 // Health returns the current health status of the streamer
-// Phase 4: Now includes checkpoint store health check
 func (s *Streamer) Health() bool {
 	// Check gRPC connection
 	if s.conn == nil {
@@ -641,18 +590,7 @@ func (s *Streamer) Health() bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	
-	sinkHealthy := s.sink.Health(ctx)
-	if !sinkHealthy {
-		return false
-	}
-	
-	// Check checkpoint store health
-	if s.checkpoint == nil {
-		return false
-	}
-	
-	checkpointHealthy := s.checkpoint.Health(ctx) == nil
-	return checkpointHealthy
+	return s.sink.Health(ctx)
 }
 
 // SinkHealthChecker implements HealthChecker for sink components

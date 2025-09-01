@@ -29,8 +29,6 @@ type Config struct {
 	ClickHouseUsername string `env:"CLICKHOUSE_USERNAME"`
 	ClickHousePassword string `env:"CLICKHOUSE_PASSWORD"`
 
-	// Checkpoint persistence
-	CheckpointDSN string `env:"CHECKPOINT_DSN"`
 
 	// Batching configuration
 	BatchRowsTx      int           `env:"BATCH_ROWS_TX"`
@@ -51,6 +49,11 @@ type Config struct {
 
 	// Debug mode - when enabled, only logs parsed data without persisting
 	DebugMode bool `env:"DEBUG_MODE"`
+
+	// Performance optimization modes
+	StreamingMode    bool `env:"STREAMING_MODE"`    // Direct write mode bypassing batcher
+	LowLatencyMode   bool `env:"LOW_LATENCY_MODE"`   // Enable all low latency optimizations
+	SkipParsing      bool `env:"SKIP_PARSING"`      // Store raw protobuf data
 
 	// Logging
 	LogLevel      string `env:"LOG_LEVEL"`
@@ -102,10 +105,6 @@ func Load() (*Config, error) {
 	cfg.ClickHouseDatabase = getEnvString("CLICKHOUSE_DATABASE", "default")
 	cfg.ClickHouseUsername = getEnvString("CLICKHOUSE_USERNAME", "default")
 	
-	if cfg.CheckpointDSN, err = getRequiredEnvString("CHECKPOINT_DSN"); err != nil {
-		return nil, err
-	}
-	
 	// Batching and retry configuration
 	cfg.BatchRowsTx = getEnvInt("BATCH_ROWS_TX", 20000)
 	cfg.BatchRowsTick = getEnvInt("BATCH_ROWS_TICK", 1000)
@@ -140,6 +139,11 @@ func Load() (*Config, error) {
 	cfg.CORSAllowCredentials = getEnvBool("CORS_ALLOW_CREDENTIALS", false)
 	cfg.Debug = getEnvBool("DEBUG", false)
 	cfg.DebugMode = getEnvBool("DEBUG_MODE", false)
+
+	// Performance optimization settings
+	cfg.StreamingMode = getEnvBool("STREAMING_MODE", false)
+	cfg.LowLatencyMode = getEnvBool("LOW_LATENCY_MODE", false)
+	cfg.SkipParsing = getEnvBool("SKIP_PARSING", false)
 
 	// Validate required configuration
 	if err := cfg.validate(); err != nil {

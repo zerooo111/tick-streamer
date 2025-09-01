@@ -53,6 +53,30 @@ func (p *TickParser) ParseTick(ctx context.Context, tick *pb.Tick) ([]*ParsedDat
 	
 	var results []*ParsedData
 	
+	// Check if we should skip heavy parsing and store raw data
+	if skipParsing, ok := p.config.Settings["skip_parsing"].(bool); ok && skipParsing {
+		// Fast path: Store raw protobuf data with minimal processing
+		rawData := &ParsedData{
+			Type: "raw_tick",
+			Data: tick, // Store the raw protobuf message
+			Metadata: map[string]interface{}{
+				"tick_number":       tick.TickNumber,
+				"transaction_count": len(tick.Transactions),
+				"timestamp":        tick.Timestamp,
+				"fast_path":        true,
+			},
+		}
+		results = append(results, rawData)
+		
+		// Minimal logging for performance
+		if len(tick.Transactions) > 0 {
+			log.Printf("🚀 Fast-parsed tick #%d: %d txs", tick.TickNumber, len(tick.Transactions))
+		}
+		
+		return results, nil
+	}
+	
+	// Traditional parsing path with full data transformation
 	// Only process ticks that have transactions
 	if len(tick.Transactions) > 0 {
 		// Create tick record
@@ -89,7 +113,7 @@ func (p *TickParser) ParseTick(ctx context.Context, tick *pb.Tick) ([]*ParsedDat
 		// Logs should be handled separately, not sent through data persistence
 	}
 	
-	// Log stats directly instead of sending through pipeline
+	// Only log ticks with transactions (we don't process empty ticks)
 	if len(tick.Transactions) > 0 {
 		log.Printf("📊 Parsed tick #%d: %d transactions, VDF proof: %t", 
 			tick.TickNumber, len(tick.Transactions), tick.VdfProof != nil)

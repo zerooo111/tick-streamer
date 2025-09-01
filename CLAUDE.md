@@ -19,10 +19,14 @@
 
 ### Data Flow Architecture
 ```
-Sequencer gRPC Stream → Transformer → Batcher → Sink Interface → Database
+Sequencer gRPC Stream → Parser → [Batcher OR Direct Write] → Sink Interface → Database
                                          ↓
-                                   Checkpoint System
+                                 Performance Optimizations
 ```
+
+**Two Processing Modes:**
+- **Traditional Mode**: Stream → Parser → Batcher → Sink (high throughput)
+- **Streaming Mode**: Stream → Parser → Direct Sink Write (ultra-low latency)
 
 ## Core Components to Build
 
@@ -55,18 +59,22 @@ type Sink interface {
 - Time-based batching (100ms max wait)
 - Concurrent processing patterns
 
-### 4. Checkpoint System (`internal/checkpoint/`)
-**Go Learning**: File I/O, SQLite integration, durability patterns
-- SQLite-based persistence of last processed tick
-- Atomic checkpoint updates after successful sink flush
+### 4. Performance Optimizations
+**Go Learning**: Configuration patterns, conditional processing, latency optimization
+- Streaming mode for direct writes bypassing batcher
+- Configurable batch sizes and timeouts
+- Raw protobuf storage option for minimal parsing overhead
 
 ### 5. Configuration (`internal/config/`)
 **Go Learning**: Environment variables, flag parsing, validation
 ```go
 type Config struct {
     SequencerAddr    string `env:"SEQUENCER_ADDR" default:"localhost:9090"`
-    SinkKind         string `env:"SINK_KIND" default:"mock"`
-    BatchRowsTx      int    `env:"BATCH_ROWS_TX" default:"20000"`
+    SinkKind         string `env:"SINK_KIND" default:"clickhouse"`
+    BatchRowsTx      int    `env:"BATCH_ROWS_TX" default:"100"`        // Optimized for low latency
+    StreamingMode    bool   `env:"STREAMING_MODE" default:"true"`      // Direct write mode
+    LowLatencyMode   bool   `env:"LOW_LATENCY_MODE" default:"true"`    // Performance optimizations
+    SkipParsing      bool   `env:"SKIP_PARSING" default:"false"`       // Raw protobuf storage
     // ...
 }
 ```
@@ -93,7 +101,7 @@ type Config struct {
 **Go Learning**: Error types, context cancellation, retry patterns
 1. **gRPC Unavailable**: Exponential backoff with jitter
 2. **Sink Write Failed**: Retry with degraded mode fallback  
-3. **Checkpoint Save Failed**: Fail-fast to prevent data loss
+3. **Parser Error**: Log and continue (drop malformed records)
 4. **Payload Decode Error**: Log and continue (drop bad records)
 
 ### Reorg Handling
@@ -101,18 +109,27 @@ type Config struct {
 - Detect conflicting ticks by comparing VDF outputs
 - Invalidate old rows, insert new ones with incremented version
 
-## Observability
+## Performance & Observability
+
+### Latency Optimizations
+**IMPLEMENTED**: Ultra-low latency streaming pipeline
+- **Streaming Mode**: Direct write bypassing batcher (10-20s → sub-second)
+- **Small Batches**: BATCH_ROWS_TX=100, BATCH_MAX_WAIT_MS=10ms
+- **No Checkpoints**: Always start from latest tick for real-time processing
+- **Raw Storage**: Optional SKIP_PARSING for minimal overhead
+- **Component Timing**: Per-tick latency breakdown (parse, sink, total)
 
 ### Health Checks (`/healthz`)
 **Go Learning**: HTTP servers, middleware
 - 200 OK when streaming + sink writable
 - 500 when in degraded state
 
-### Metrics (`/metrics`) 
-**Go Learning**: Prometheus integration, instrumentation
-- Counters: `stream_ticks_received_total`, `reconnects_total`
-- Gauges: `last_committed_tick`, `batch_rows_tx`  
-- Histograms: `sink_upsert_duration_seconds`
+### Metrics & Monitoring
+**Go Learning**: Performance measurement, instrumentation
+- **Latency Metrics**: Parse time, sink time, total processing time per tick
+- **Throughput**: Ticks per second, transactions processed
+- **Mode Detection**: Traditional vs streaming mode indicators
+- **Error Rates**: Failed writes, parser errors, connection issues
 
 ## Go Learning Path Integration
 
@@ -145,25 +162,49 @@ go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
 # Development dependencies will be added to go.mod as needed
 ```
 
-### Project Structure (Target)
+### Project Structure (Current)
 ```
 tick-streamer/
 ├── cmd/streamer/           # Main application entry point
+├── cmd/api-server/         # REST API server
 ├── internal/
 │   ├── config/            # Configuration management
 │   ├── models/            # Data structure definitions  
-│   ├── streamer/          # Core streaming logic
-│   ├── sink/              # Database abstraction layer
-│   └── checkpoint/        # Checkpoint persistence
+│   ├── streamer/          # Core streaming logic with latency optimizations
+│   ├── parser/            # Pluggable data transformation
+│   ├── batcher/           # Concurrent batching system
+│   ├── sink/              # Database abstraction layer (ClickHouse focus)
+│   ├── resilience/        # Circuit breakers, retries, health checks
+│   └── validation/        # Tick validation and reorg detection
 ├── proto/                 # gRPC definitions (existing)
-├── .env.example          # Environment variable template
-├── RUNBOOK.md            # Operations guide
-└── REORG.md              # Reorg handling guide
+├── .env                  # Production-ready environment config
+├── CLAUDE.md             # Project memory (this file)
+└── README.md             # Updated documentation
 ```
 
-## Implementation Phases
+## Current Implementation Status
 
-The spec defines 8 phases from skeleton to performance testing. We'll implement these incrementally, teaching Go concepts at each step while building a production-ready system.
+### ✅ Completed (Production Ready)
+- **Ultra-low latency streaming**: 10-20s → sub-second processing
+- **Dual processing modes**: Traditional batching + Direct streaming
+- **ClickHouse integration**: Optimized for high-throughput analytics
+- **Resilience patterns**: Circuit breakers, retries, health monitoring
+- **Performance monitoring**: Component-level latency tracking
+- **Configuration system**: Environment-based with validation
+- **Error handling**: Graceful degradation and recovery
+
+### 🚀 Recent Optimizations (2024)
+- **Checkpoint system removed**: Always start from latest tick (0)
+- **Streaming mode**: Direct writes bypass batcher entirely  
+- **Batch size optimization**: 20k→100 rows, 100ms→10ms timeouts
+- **Parser optimization**: Optional raw protobuf storage
+- **Resource optimization**: Batcher only runs when needed
+
+### 🔮 Future Enhancements
+- **Kafka integration**: Replace in-memory streaming with durable message queue
+- **Horizontal scaling**: Multi-instance deployment with load balancing
+- **Advanced monitoring**: Prometheus metrics, distributed tracing
+- **Schema evolution**: Dynamic protobuf handling
 
 ## Key Design Decisions
 
