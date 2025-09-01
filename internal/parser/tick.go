@@ -2,9 +2,10 @@ package parser
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 
-	"google.golang.org/protobuf/proto"
 	pb "github.com/zerooo111/tick-streamer/proto"
 )
 
@@ -39,72 +40,91 @@ func NewTickParser(cfg ParserConfig) (*TickParser, error) {
 	return parser, nil
 }
 
-// ParseTick transforms a protobuf Tick into ParsedData records
-// This contains all the parsing logic previously in streamer.processTick
+// ParseTick transforms a protobuf Tick into ParsedData records with full parsing
 func (p *TickParser) ParseTick(ctx context.Context, tick *pb.Tick) ([]*ParsedData, error) {
 	if tick == nil {
 		return nil, ErrInvalidTickData
 	}
 	
-	var results []*ParsedData
-	
-	// ALWAYS use ultra-fast raw storage - no config needed
-	// Pre-serialize once and bundle everything for maximum performance
-	tickBytes, err := proto.Marshal(tick)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal tick %d: %w", tick.TickNumber, err)
+	// Parse tick data
+	tickData := TickData{
+		TickNumber:           tick.TickNumber,
+		Timestamp:           tick.Timestamp,
+		TransactionBatchHash: tick.TransactionBatchHash,
+		PreviousOutput:      tick.PreviousOutput,
+		TxCount:             uint32(len(tick.Transactions)),
 	}
 	
-	// Pre-serialize all transactions - extract the inner Transaction from OrderedTransaction
-	transactions := make([]RawTransactionData, len(tick.Transactions))
-	for i, orderedTx := range tick.Transactions {
-		// Extract the actual Transaction from OrderedTransaction
+	// Parse VDF proof if present
+	if tick.VdfProof != nil {
+		tickData.VDFInput = tick.VdfProof.Input
+		tickData.VDFOutput = tick.VdfProof.Output
+		tickData.VDFProof = tick.VdfProof.Proof
+		tickData.VDFIterations = tick.VdfProof.Iterations
+	}
+	
+	// Parse transactions
+	transactions := make([]TransactionData, 0, len(tick.Transactions))
+	for _, orderedTx := range tick.Transactions {
 		if orderedTx.Transaction == nil {
-			return nil, fmt.Errorf("ordered transaction %d in tick %d has nil transaction", i, tick.TickNumber)
+			continue // Skip nil transactions
 		}
 		
-		txBytes, err := proto.Marshal(orderedTx.Transaction)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal transaction %d in tick %d: %w", i, tick.TickNumber, err)
+		tx := orderedTx.Transaction
+		
+		// Calculate transaction hash from OrderedTransaction data if provided, otherwise from Transaction
+		txHash := orderedTx.TxHash
+		if txHash == "" {
+			// Generate hash from transaction data
+			hashData := fmt.Sprintf("%s_%d_%d_%s", tx.TxId, tx.Nonce, tx.Timestamp, hex.EncodeToString(tx.Payload))
+			hashBytes := sha256.Sum256([]byte(hashData))
+			txHash = hex.EncodeToString(hashBytes[:])
 		}
 		
-		transactions[i] = RawTransactionData{
-			SequenceNumber: orderedTx.SequenceNumber,
-			TxBytes:        txBytes,
+		txData := TransactionData{
+			TickNumber:         tick.TickNumber,
+			SequenceNumber:     orderedTx.SequenceNumber,
+			TxHash:             txHash,
+			TxID:               tx.TxId,
+			Nonce:              tx.Nonce,
+			Payload:            tx.Payload,
+			Timestamp:          tx.Timestamp,
+			PublicKey:          tx.PublicKey,
+			Signature:          tx.Signature,
+			IngestionTimestamp: orderedTx.IngestionTimestamp,
+			PayloadSize:        int32(len(tx.Payload)),
 		}
+		
+		transactions = append(transactions, txData)
 	}
 	
-	// Create single bundle with all pre-serialized data
-	bundle := &RawTickBundle{
-		TickNumber:       tick.TickNumber,
-		TimestampUS:      int64(tick.Timestamp),
-		TransactionCount: int32(len(tick.Transactions)),
-		TickBytes:        tickBytes,
-		Transactions:     transactions,
+	// Create parsed bundle
+	bundle := &ParsedBundle{
+		Tick:         tickData,
+		Transactions: transactions,
 	}
 	
-	rawBundleData := &ParsedData{
-		Type: "raw_bundle",
+	parsedData := &ParsedData{
+		Type: "parsed_bundle",
 		Data: bundle,
 		Metadata: map[string]interface{}{
 			"tick_number":       tick.TickNumber,
-			"transaction_count": len(tick.Transactions),
-			"timestamp":        tick.Timestamp,
-			"ultra_fast_path":  true,
+			"transaction_count": len(transactions),
+			"timestamp":         tick.Timestamp,
+			"parsed":            true,
 		},
 	}
-	results = append(results, rawBundleData)
 	
-	return results, nil
+	return []*ParsedData{parsedData}, nil
 }
 
 // GetParserInfo returns metadata about this parser
 func (p *TickParser) GetParserInfo() ParserInfo {
 	return ParserInfo{
-		Name:        "RawTickParser",
-		Version:     "3.0",
-		Description: "Ultra-fast raw protobuf storage parser for maximum performance",
-		DataTypes:   []string{"raw_bundle"},
+		Name:        "TickParser",
+		Version:     "4.0",
+		Description: "Full-featured tick parser that extracts all fields for querying",
+		DataTypes:   []string{"parsed_bundle"},
 	}
 }
 

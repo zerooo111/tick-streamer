@@ -19,19 +19,38 @@ type ParsedData struct {
 	Metadata map[string]interface{} `json:"metadata,omitempty"`
 }
 
-// RawTransactionData represents a single transaction with its sequence number
-type RawTransactionData struct {
-	SequenceNumber uint64
-	TxBytes        []byte
+// TickData represents a parsed tick with all fields from protobuf
+type TickData struct {
+	TickNumber           uint64    `json:"tick_number"`
+	Timestamp            uint64    `json:"timestamp"`
+	VDFInput             string    `json:"vdf_input"`
+	VDFOutput            string    `json:"vdf_output"`
+	VDFProof             string    `json:"vdf_proof"`
+	VDFIterations        uint64    `json:"vdf_iterations"`
+	TransactionBatchHash string    `json:"transaction_batch_hash"`
+	PreviousOutput       string    `json:"previous_output"`
+	TxCount              uint32    `json:"tx_count"`
 }
 
-// RawTickBundle represents a complete tick with pre-serialized data for ultra-low latency
-type RawTickBundle struct {
-	TickNumber       uint64
-	TimestampUS      int64
-	TransactionCount int32
-	TickBytes        []byte
-	Transactions     []RawTransactionData // Transaction bytes with sequence numbers
+// TransactionData represents a parsed transaction with all fields from protobuf
+type TransactionData struct {
+	TickNumber         uint64 `json:"tick_number"`
+	SequenceNumber     uint64 `json:"sequence_number"`
+	TxHash             string `json:"tx_hash"`
+	TxID               string `json:"tx_id"`
+	Nonce              uint64 `json:"nonce"`
+	Payload            []byte `json:"payload"`
+	Timestamp          uint64 `json:"timestamp"`
+	PublicKey          []byte `json:"public_key"`
+	Signature          []byte `json:"signature"`
+	IngestionTimestamp uint64 `json:"ingestion_timestamp"`
+	PayloadSize        int32  `json:"payload_size"`
+}
+
+// ParsedBundle represents a complete tick with parsed transactions
+type ParsedBundle struct {
+	Tick         TickData          `json:"tick"`
+	Transactions []TransactionData `json:"transactions"`
 }
 
 // Parser defines the interface for parsing protobuf messages into sink-compatible format

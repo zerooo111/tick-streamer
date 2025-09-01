@@ -10,15 +10,15 @@ CREATE TABLE transactions (
     nonce                BIGINT NOT NULL,
     payload              BYTEA, -- Store raw payload bytes
     timestamp_us         BIGINT NOT NULL,
-    public_key           TEXT NOT NULL,
-    signature            TEXT NOT NULL,
+    public_key           BYTEA NOT NULL, -- Store as bytea not text
+    signature            BYTEA NOT NULL, -- Store as bytea not text
     ingestion_timestamp  BIGINT NOT NULL,
     processed_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     payload_size         INTEGER NOT NULL DEFAULT 0,
     payload_type         TEXT,
     version              INTEGER NOT NULL DEFAULT 1,
     
-    PRIMARY KEY (processed_at, tick_number, sequence_number)
+    PRIMARY KEY (processed_at, sequence_number)
 );
 
 -- Convert to hypertable partitioned by time
@@ -27,12 +27,13 @@ SELECT create_hypertable('transactions', 'processed_at',
     if_not_exists => TRUE
 );
 
+
 -- Create indexes for common queries
 CREATE INDEX IF NOT EXISTS idx_transactions_tick_number ON transactions (tick_number);
 CREATE INDEX IF NOT EXISTS idx_transactions_tx_hash ON transactions USING HASH (tx_hash);
 CREATE INDEX IF NOT EXISTS idx_transactions_tx_id ON transactions USING HASH (tx_id);
-CREATE INDEX IF NOT EXISTS idx_transactions_public_key ON transactions USING HASH (public_key);
 CREATE INDEX IF NOT EXISTS idx_transactions_timestamp ON transactions (timestamp_us);
+CREATE INDEX IF NOT EXISTS idx_transactions_processed_at ON transactions (processed_at);
 CREATE INDEX IF NOT EXISTS idx_transactions_payload_type ON transactions (payload_type);
 
 -- Add aggressive compression policy (compress chunks older than 2 hours due to high volume)

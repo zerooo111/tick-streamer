@@ -15,20 +15,32 @@ import (
 	"github.com/zerooo111/tick-streamer/internal/parser"
 )
 
-// RawTickData represents raw protobuf tick data for storage
-type RawTickData struct {
-	TickNumber       uint64
-	TimestampUS      int64
-	TransactionCount int32
-	RawBytes         []byte
+// TickRow represents tick data for database storage
+type TickRow struct {
+	TickNumber           uint64 `db:"tick_number"`
+	Timestamp            uint64 `db:"timestamp_us"`
+	VDFInput             string `db:"vdf_input"`
+	VDFOutput            string `db:"vdf_output"`
+	VDFProof             string `db:"vdf_proof"`
+	VDFIterations        uint64 `db:"vdf_iterations"`
+	TransactionBatchHash string `db:"transaction_batch_hash"`
+	PreviousOutput       string `db:"previous_output"`
+	TxCount              uint32 `db:"tx_count"`
 }
 
-// RawTransactionData represents raw protobuf transaction data for storage  
-type RawTransactionData struct {
-	TickNumber      uint64
-	SequenceNumber  uint32
-	TimestampUS     int64
-	RawBytes        []byte
+// TransactionRow represents transaction data for database storage
+type TransactionRow struct {
+	TickNumber         uint64 `db:"tick_number"`
+	SequenceNumber     uint64 `db:"sequence_number"`
+	TxHash             string `db:"tx_hash"`
+	TxID               string `db:"tx_id"`
+	Nonce              uint64 `db:"nonce"`
+	Payload            []byte `db:"payload"`
+	Timestamp          uint64 `db:"timestamp_us"`
+	PublicKey          []byte `db:"public_key"`
+	Signature          []byte `db:"signature"`
+	IngestionTimestamp uint64 `db:"ingestion_timestamp"`
+	PayloadSize        int32  `db:"payload_size"`
 }
 
 
@@ -43,8 +55,8 @@ type TimescaleDBSink struct {
 	closed    bool
 	
 	// Internal batching - accumulate data until flush conditions met
-	rawTickBatch     []*RawTickData
-	rawTxBatch       []*RawTransactionData
+	tickBatch     []*TickRow
+	txBatch       []*TransactionRow
 	
 	// Batch configuration - sink decides when to flush
 	batchSize     int
@@ -205,37 +217,49 @@ func (s *TimescaleDBSink) PersistData(ctx context.Context, data []*parser.Parsed
 		return ErrSinkClosed
 	}
 	
-	// Process parsed data - ALWAYS raw_bundle type only
+	// Process parsed data - handle parsed_bundle type
 	for _, parsed := range data {
-		// Only handle raw_bundle
-		if bundle, ok := parsed.Data.(*parser.RawTickBundle); ok {
+		// Handle parsed_bundle
+		if bundle, ok := parsed.Data.(*parser.ParsedBundle); ok {
 			// Skip saving tick if it has 0 transactions
-			if bundle.TransactionCount == 0 {
+			if len(bundle.Transactions) == 0 {
 				continue
 			}
 			
-			// Store tick data using pre-serialized bytes
-			rawTick := &RawTickData{
-				TickNumber:       bundle.TickNumber,
-				TimestampUS:      bundle.TimestampUS,
-				TransactionCount: bundle.TransactionCount,
-				RawBytes:        bundle.TickBytes, // Use pre-serialized bytes
+			// Store tick data
+			tickRow := &TickRow{
+				TickNumber:           bundle.Tick.TickNumber,
+				Timestamp:            bundle.Tick.Timestamp,
+				VDFInput:             bundle.Tick.VDFInput,
+				VDFOutput:            bundle.Tick.VDFOutput,
+				VDFProof:             bundle.Tick.VDFProof,
+				VDFIterations:        bundle.Tick.VDFIterations,
+				TransactionBatchHash: bundle.Tick.TransactionBatchHash,
+				PreviousOutput:       bundle.Tick.PreviousOutput,
+				TxCount:              bundle.Tick.TxCount,
 			}
-			s.rawTickBatch = append(s.rawTickBatch, rawTick)
+			s.tickBatch = append(s.tickBatch, tickRow)
 			
-			// Store all transactions using pre-serialized bytes with correct sequence numbers
+			// Store all transactions
 			for _, tx := range bundle.Transactions {
-				rawTx := &RawTransactionData{
-					TickNumber:     bundle.TickNumber,
-					SequenceNumber: uint32(tx.SequenceNumber),
-					TimestampUS:    bundle.TimestampUS,
-					RawBytes:       tx.TxBytes, // Use pre-serialized bytes
+				txRow := &TransactionRow{
+					TickNumber:         tx.TickNumber,
+					SequenceNumber:     tx.SequenceNumber,
+					TxHash:             tx.TxHash,
+					TxID:               tx.TxID,
+					Nonce:              tx.Nonce,
+					Payload:            tx.Payload,
+					Timestamp:          tx.Timestamp,
+					PublicKey:          tx.PublicKey,
+					Signature:          tx.Signature,
+					IngestionTimestamp: tx.IngestionTimestamp,
+					PayloadSize:        tx.PayloadSize,
 				}
-				s.rawTxBatch = append(s.rawTxBatch, rawTx)
+				s.txBatch = append(s.txBatch, txRow)
 			}
 			
-			if bundle.TickNumber > s.lastTick {
-				s.lastTick = bundle.TickNumber
+			if bundle.Tick.TickNumber > s.lastTick {
+				s.lastTick = bundle.Tick.TickNumber
 			}
 		}
 	}
@@ -392,7 +416,7 @@ func getEnvAsInt(name string, defaultVal int) int {
 
 // shouldFlush determines if batches should be flushed based on size or time
 func (s *TimescaleDBSink) shouldFlush() bool {
-	totalRows := len(s.rawTickBatch) + len(s.rawTxBatch)
+	totalRows := len(s.tickBatch) + len(s.txBatch)
 	
 	// Direct write mode: Flush immediately if any data exists
 	if s.batchSize <= 1 && totalRows > 0 {
@@ -416,24 +440,24 @@ func (s *TimescaleDBSink) shouldFlush() bool {
 func (s *TimescaleDBSink) flushBatches(ctx context.Context) error {
 	start := time.Now()
 	
-	// Flush raw ticks if any
-	if len(s.rawTickBatch) > 0 {
-		if err := s.insertRawTicks(ctx, s.rawTickBatch); err != nil {
+	// Flush ticks if any
+	if len(s.tickBatch) > 0 {
+		if err := s.insertTicks(ctx, s.tickBatch); err != nil {
 			s.stats.ErrorCount++
-			return fmt.Errorf("failed to insert raw ticks: %w", err)
+			return fmt.Errorf("failed to insert ticks: %w", err)
 		}
-		s.stats.TicksInserted += uint64(len(s.rawTickBatch))
-		s.rawTickBatch = s.rawTickBatch[:0] // Clear batch but keep capacity
+		s.stats.TicksInserted += uint64(len(s.tickBatch))
+		s.tickBatch = s.tickBatch[:0] // Clear batch but keep capacity
 	}
 	
-	// Flush raw transactions if any
-	if len(s.rawTxBatch) > 0 {
-		if err := s.insertRawTransactions(ctx, s.rawTxBatch); err != nil {
+	// Flush transactions if any
+	if len(s.txBatch) > 0 {
+		if err := s.insertTransactions(ctx, s.txBatch); err != nil {
 			s.stats.ErrorCount++
-			return fmt.Errorf("failed to insert raw transactions: %w", err)
+			return fmt.Errorf("failed to insert transactions: %w", err)
 		}
-		s.stats.TransactionsInserted += uint64(len(s.rawTxBatch))
-		s.rawTxBatch = s.rawTxBatch[:0] // Clear batch but keep capacity
+		s.stats.TransactionsInserted += uint64(len(s.txBatch))
+		s.txBatch = s.txBatch[:0] // Clear batch but keep capacity
 	}
 	
 	// Update flush stats
@@ -453,38 +477,50 @@ func (s *TimescaleDBSink) flushBatches(ctx context.Context) error {
 	return nil
 }
 
-// insertRawTicks bulk inserts raw tick data using batch INSERT for maximum performance
-func (s *TimescaleDBSink) insertRawTicks(ctx context.Context, rawTicks []*RawTickData) error {
-	if len(rawTicks) == 0 {
+// insertTicks bulk inserts tick data using batch INSERT for maximum performance
+func (s *TimescaleDBSink) insertTicks(ctx context.Context, ticks []*TickRow) error {
+	if len(ticks) == 0 {
 		return nil
 	}
 	
-	// Build batch INSERT statement
-	valueStrings := make([]string, 0, len(rawTicks))
-	valueArgs := make([]interface{}, 0, len(rawTicks)*8)
+	// Build batch INSERT statement - 11 fields
+	valueStrings := make([]string, 0, len(ticks))
+	valueArgs := make([]interface{}, 0, len(ticks)*11)
 	
 	processedAt := time.Now()
 	
-	for i, rawTick := range rawTicks {
-		valueStrings = append(valueStrings, fmt.Sprintf("($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)",
-			i*8+1, i*8+2, i*8+3, i*8+4, i*8+5, i*8+6, i*8+7, i*8+8))
+	for i, tick := range ticks {
+		valueStrings = append(valueStrings, fmt.Sprintf("($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)",
+			i*11+1, i*11+2, i*11+3, i*11+4, i*11+5, i*11+6, i*11+7, i*11+8, i*11+9, i*11+10, i*11+11))
 		
 		valueArgs = append(valueArgs,
-			rawTick.TickNumber,
-			rawTick.TimestampUS,
+			tick.TickNumber,
+			tick.Timestamp,
+			nullString(tick.VDFInput),
+			nullString(tick.VDFOutput),
+			nullString(tick.VDFProof),
+			tick.VDFIterations,
+			nullString(tick.TransactionBatchHash),
+			nullString(tick.PreviousOutput),
+			tick.TxCount,
 			processedAt,
-			rawTick.TransactionCount,
-			rawTick.RawBytes,
-			"mainnet", // chain_id
-			"qubic",   // network
-			1,         // version
+			1, // version
 		)
 	}
 	
-	stmt := fmt.Sprintf(`INSERT INTO raw_ticks (
-		tick_number, timestamp_us, processed_at, transaction_count, 
-		raw_data, chain_id, network, version
-	) VALUES %s ON CONFLICT (processed_at, tick_number) DO UPDATE SET version = EXCLUDED.version`,
+	stmt := fmt.Sprintf(`INSERT INTO ticks (
+		tick_number, timestamp_us, vdf_input, vdf_output, vdf_proof, vdf_iterations,
+		transaction_batch_hash, previous_output, tx_count, processed_at, version
+	) VALUES %s ON CONFLICT (processed_at, tick_number) DO UPDATE SET 
+		timestamp_us = EXCLUDED.timestamp_us,
+		vdf_input = EXCLUDED.vdf_input,
+		vdf_output = EXCLUDED.vdf_output,
+		vdf_proof = EXCLUDED.vdf_proof,
+		vdf_iterations = EXCLUDED.vdf_iterations,
+		transaction_batch_hash = EXCLUDED.transaction_batch_hash,
+		previous_output = EXCLUDED.previous_output,
+		tx_count = EXCLUDED.tx_count,
+		version = EXCLUDED.version`,
 		strings.Join(valueStrings, ","))
 	
 	_, err := s.db.ExecContext(ctx, stmt, valueArgs...)
@@ -492,42 +528,60 @@ func (s *TimescaleDBSink) insertRawTicks(ctx context.Context, rawTicks []*RawTic
 		return fmt.Errorf("batch insert failed: %w", err)
 	}
 	
-	fmt.Printf("📝 Inserted %d raw ticks to TimescaleDB\n", len(rawTicks))
+	fmt.Printf("📝 Inserted %d ticks to TimescaleDB\n", len(ticks))
 	return nil
 }
 
-// insertRawTransactions bulk inserts raw transaction data using batch INSERT for maximum performance
-func (s *TimescaleDBSink) insertRawTransactions(ctx context.Context, rawTxs []*RawTransactionData) error {
-	if len(rawTxs) == 0 {
+// insertTransactions bulk inserts transaction data using batch INSERT for maximum performance
+func (s *TimescaleDBSink) insertTransactions(ctx context.Context, txs []*TransactionRow) error {
+	if len(txs) == 0 {
 		return nil
 	}
 	
-	// Build batch INSERT statement
-	valueStrings := make([]string, 0, len(rawTxs))
-	valueArgs := make([]interface{}, 0, len(rawTxs)*8)
+	// Build batch INSERT statement - 13 fields
+	valueStrings := make([]string, 0, len(txs))
+	valueArgs := make([]interface{}, 0, len(txs)*14) // 13 fields + version
 	
 	processedAt := time.Now()
 	
-	for i, rawTx := range rawTxs {
-		valueStrings = append(valueStrings, fmt.Sprintf("($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)",
-			i*8+1, i*8+2, i*8+3, i*8+4, i*8+5, i*8+6, i*8+7, i*8+8))
+	for i, tx := range txs {
+		valueStrings = append(valueStrings, fmt.Sprintf("($%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d,$%d)",
+			i*14+1, i*14+2, i*14+3, i*14+4, i*14+5, i*14+6, i*14+7, i*14+8, i*14+9, i*14+10, i*14+11, i*14+12, i*14+13, i*14+14))
 		
 		valueArgs = append(valueArgs,
-			rawTx.TickNumber,
-			rawTx.SequenceNumber,
-			rawTx.TimestampUS,
+			tx.TickNumber,
+			tx.SequenceNumber,
+			tx.TxHash,
+			tx.TxID,
+			tx.Nonce,
+			tx.Payload,
+			tx.Timestamp,
+			tx.PublicKey,
+			tx.Signature,
+			tx.IngestionTimestamp,
 			processedAt,
-			rawTx.RawBytes,
-			"mainnet", // chain_id
-			"qubic",   // network
-			1,         // version
+			tx.PayloadSize,
+			"", // payload_type (empty)
+			1,  // version
 		)
 	}
 	
-	stmt := fmt.Sprintf(`INSERT INTO raw_transactions (
-		tick_number, sequence_number, timestamp_us, processed_at,
-		raw_data, chain_id, network, version
-	) VALUES %s ON CONFLICT (processed_at, tick_number, sequence_number) DO UPDATE SET version = EXCLUDED.version`,
+	stmt := fmt.Sprintf(`INSERT INTO transactions (
+		tick_number, sequence_number, tx_hash, tx_id, nonce, payload, timestamp_us,
+		public_key, signature, ingestion_timestamp, processed_at, payload_size, payload_type, version
+	) VALUES %s ON CONFLICT (processed_at, sequence_number) DO UPDATE SET 
+		tick_number = EXCLUDED.tick_number,
+		tx_hash = EXCLUDED.tx_hash,
+		tx_id = EXCLUDED.tx_id,
+		nonce = EXCLUDED.nonce,
+		payload = EXCLUDED.payload,
+		timestamp_us = EXCLUDED.timestamp_us,
+		public_key = EXCLUDED.public_key,
+		signature = EXCLUDED.signature,
+		ingestion_timestamp = EXCLUDED.ingestion_timestamp,
+		payload_size = EXCLUDED.payload_size,
+		payload_type = EXCLUDED.payload_type,
+		version = EXCLUDED.version`,
 		strings.Join(valueStrings, ","))
 	
 	_, err := s.db.ExecContext(ctx, stmt, valueArgs...)
@@ -535,7 +589,7 @@ func (s *TimescaleDBSink) insertRawTransactions(ctx context.Context, rawTxs []*R
 		return fmt.Errorf("batch insert failed: %w", err)
 	}
 	
-	fmt.Printf("📝 Inserted %d raw transactions to TimescaleDB\n", len(rawTxs))
+	fmt.Printf("📝 Inserted %d transactions to TimescaleDB\n", len(txs))
 	return nil
 }
 

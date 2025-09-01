@@ -2,19 +2,15 @@ package repository
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"fmt"
 	"os"
 	"strconv"
 	"time"
 
 	_ "github.com/lib/pq" // PostgreSQL driver
-	"google.golang.org/protobuf/proto"
 	
 	"github.com/zerooo111/tick-streamer/internal/config"
-	pb "github.com/zerooo111/tick-streamer/proto"
 )
 
 type TimescaleDBRepository struct {
@@ -85,22 +81,20 @@ func (r *TimescaleDBRepository) GetTick(ctx context.Context, tickNumber uint64) 
 	
 	// Query main tick data
 	tickQuery := `
-		SELECT tick_number, height, block_hash, parent_hash, tx_count, 
-			   payload_size_bytes, size_bytes, timestamp_us, processed_at,
-			   proposer_id, proposer_key, chain_id, network, version
+		SELECT tick_number, timestamp_us, vdf_input, vdf_output, vdf_proof, vdf_iterations,
+			   transaction_batch_hash, previous_output, tx_count, processed_at, version
 		FROM ticks 
 		WHERE tick_number = $1 AND version > 0
 		ORDER BY processed_at DESC
 		LIMIT 1`
 	
 	var tick TickData
-	var timestampUs int64
+	var vdfInput, vdfOutput, vdfProof, transactionBatchHash, previousOutput sql.NullString
+	var vdfIterations sql.NullInt64
 	
 	err := r.db.QueryRowContext(ctx, tickQuery, tickNumber).Scan(
-		&tick.TickNumber, &tick.Height, &tick.BlockHash, &tick.ParentHash,
-		&tick.TxCount, &tick.PayloadSizeBytes, &tick.SizeBytes,
-		&timestampUs, &tick.ProcessedAt, &tick.ProposerID, &tick.ProposerKey,
-		&tick.ChainID, &tick.Network, &tick.Version,
+		&tick.TickNumber, &tick.Timestamp, &vdfInput, &vdfOutput, &vdfProof, &vdfIterations,
+		&transactionBatchHash, &previousOutput, &tick.TxCount, &tick.ProcessedAt, &tick.Version,
 	)
 	
 	if err != nil {
@@ -110,12 +104,31 @@ func (r *TimescaleDBRepository) GetTick(ctx context.Context, tickNumber uint64) 
 		return nil, fmt.Errorf("failed to query tick: %w", err)
 	}
 	
-	tick.Timestamp = uint64(timestampUs)
+	// Handle nullable fields
+	if vdfInput.Valid {
+		tick.VDFInput = vdfInput.String
+	}
+	if vdfOutput.Valid {
+		tick.VDFOutput = vdfOutput.String
+	}
+	if vdfProof.Valid {
+		tick.VDFProof = vdfProof.String
+	}
+	if vdfIterations.Valid {
+		tick.VDFIterations = uint64(vdfIterations.Int64)
+	}
+	if transactionBatchHash.Valid {
+		tick.TransactionBatchHash = transactionBatchHash.String
+	}
+	if previousOutput.Valid {
+		tick.PreviousOutput = previousOutput.String
+	}
 	
 	// Query associated transactions
 	txQuery := `
 		SELECT tick_number, sequence_number, tx_hash, tx_id, nonce,
-			   encode(payload, 'hex') as payload, timestamp_us, public_key, signature,
+			   encode(payload, 'hex') as payload, timestamp_us, 
+			   encode(public_key, 'hex') as public_key, encode(signature, 'hex') as signature,
 			   ingestion_timestamp, processed_at, payload_size, payload_type, version
 		FROM transactions 
 		WHERE tick_number = $1 AND version > 0
@@ -130,21 +143,25 @@ func (r *TimescaleDBRepository) GetTick(ctx context.Context, tickNumber uint64) 
 	var transactions []TransactionData
 	for rows.Next() {
 		var tx TransactionData
-		var txTimestampUs int64
-		var ingestionTimestampUs int64
+		var payloadType sql.NullString
 		
 		err := rows.Scan(
 			&tx.TickNumber, &tx.SequenceNumber, &tx.TxHash, &tx.TxID,
-			&tx.Nonce, &tx.Payload, &txTimestampUs, &tx.PublicKey, &tx.Signature,
-			&ingestionTimestampUs, &tx.ProcessedAt, &tx.PayloadSize,
-			&tx.PayloadType, &tx.Version,
+			&tx.Nonce, &tx.Payload, &tx.Timestamp, &tx.PublicKey, &tx.Signature,
+			&tx.IngestionTimestamp, &tx.ProcessedAt, &tx.PayloadSize,
+			&payloadType, &tx.Version,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan transaction: %w", err)
 		}
 		
-		tx.Timestamp = uint64(txTimestampUs)
-		tx.IngestionTimestamp = uint64(ingestionTimestampUs)
+		if payloadType.Valid {
+			tx.PayloadType = payloadType.String
+		}
+		
+		// Decode payload to human-readable format
+		tx.PayloadDecoded = DecodePayload(tx.Payload)
+		
 		transactions = append(transactions, tx)
 	}
 	
@@ -159,8 +176,9 @@ func (r *TimescaleDBRepository) GetRecentTicks(ctx context.Context, limit int) (
 	}
 	
 	query := `
-		SELECT tick_number, timestamp_us, processed_at, transaction_count, raw_data
-		FROM raw_ticks 
+		SELECT tick_number, timestamp_us, vdf_input, vdf_output, vdf_proof, vdf_iterations,
+			   transaction_batch_hash, previous_output, tx_count, processed_at, version
+		FROM ticks 
 		WHERE version > 0
 		ORDER BY processed_at DESC, tick_number DESC
 		LIMIT $1`
@@ -173,41 +191,38 @@ func (r *TimescaleDBRepository) GetRecentTicks(ctx context.Context, limit int) (
 	
 	var ticks []TickData
 	for rows.Next() {
-		var tickNumber uint64
-		var timestampUs int64
-		var processedAt time.Time
-		var transactionCount int32
-		var rawData []byte
+		var tick TickData
+		var vdfInput, vdfOutput, vdfProof, transactionBatchHash, previousOutput sql.NullString
+		var vdfIterations sql.NullInt64
 		
-		err := rows.Scan(&tickNumber, &timestampUs, &processedAt, &transactionCount, &rawData)
+		err := rows.Scan(
+			&tick.TickNumber, &tick.Timestamp, &vdfInput, &vdfOutput, &vdfProof, &vdfIterations,
+			&transactionBatchHash, &previousOutput, &tick.TxCount, &tick.ProcessedAt, &tick.Version,
+		)
 		if err != nil {
-			return nil, fmt.Errorf("failed to scan raw tick: %w", err)
+			return nil, fmt.Errorf("failed to scan tick: %w", err)
 		}
 		
-		// Deserialize protobuf data
-		var pbTick pb.Tick
-		if err := proto.Unmarshal(rawData, &pbTick); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal tick protobuf: %w", err)
+		// Handle nullable fields
+		if vdfInput.Valid {
+			tick.VDFInput = vdfInput.String
+		}
+		if vdfOutput.Valid {
+			tick.VDFOutput = vdfOutput.String
+		}
+		if vdfProof.Valid {
+			tick.VDFProof = vdfProof.String
+		}
+		if vdfIterations.Valid {
+			tick.VDFIterations = uint64(vdfIterations.Int64)
+		}
+		if transactionBatchHash.Valid {
+			tick.TransactionBatchHash = transactionBatchHash.String
+		}
+		if previousOutput.Valid {
+			tick.PreviousOutput = previousOutput.String
 		}
 		
-		// Convert protobuf to API format
-		tick := TickData{
-			TickNumber:       tickNumber,
-			Timestamp:        pbTick.Timestamp,
-			TxCount:          uint32(len(pbTick.Transactions)),
-			ProcessedAt:      processedAt,
-			// Set reasonable defaults for fields not in raw data
-			Height:           0,
-			BlockHash:        "",
-			ParentHash:       "",
-			PayloadSizeBytes: 0,
-			SizeBytes:        uint64(len(rawData)),
-			ProposerID:       "",
-			ProposerKey:      "",
-			ChainID:          "mainnet",
-			Network:          "qubic",
-			Version:          1,
-		}
 		ticks = append(ticks, tick)
 	}
 	
@@ -215,21 +230,21 @@ func (r *TimescaleDBRepository) GetRecentTicks(ctx context.Context, limit int) (
 }
 
 // GetRecentTransactions retrieves the most recent transactions
-func (r *TimescaleDBRepository) GetRecentTransactions(ctx context.Context, limit int) ([]TransactionData, error) {
+func (r *TimescaleDBRepository) GetRecentTransactions(ctx context.Context, limit int) ([]RecentTransactionData, error) {
 	if r.db == nil {
 		return nil, fmt.Errorf("TimescaleDB connection not available")
 	}
 	
-	// Ultra-fast single column ordering - processed_at is indexed for time-series
+	// Query from transactions table - only essential fields for recent transactions
 	query := `
-		SELECT tick_number, sequence_number, timestamp_us, processed_at, raw_data
-		FROM raw_transactions 
+		SELECT sequence_number, tx_hash, tick_number, tx_id, timestamp_us
+		FROM transactions 
 		WHERE version > 0
 		ORDER BY processed_at DESC
 		LIMIT $1`
 	
-	// Add query timeout for faster failure detection
-	queryCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	// Add reasonable query timeout 
+	queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	
 	rows, err := r.db.QueryContext(queryCtx, query, limit)
@@ -238,49 +253,17 @@ func (r *TimescaleDBRepository) GetRecentTransactions(ctx context.Context, limit
 	}
 	defer rows.Close()
 	
-	var transactions []TransactionData
+	var transactions []RecentTransactionData
 	for rows.Next() {
-		var tickNumber uint64
-		var sequenceNumber uint32
-		var timestampUs int64
-		var processedAt time.Time
-		var rawData []byte
+		var tx RecentTransactionData
 		
-		err := rows.Scan(&tickNumber, &sequenceNumber, &timestampUs, &processedAt, &rawData)
+		err := rows.Scan(
+			&tx.SequenceNumber, &tx.TxHash, &tx.TickNumber, &tx.TxID, &tx.Timestamp,
+		)
 		if err != nil {
-			return nil, fmt.Errorf("failed to scan raw transaction: %w", err)
+			return nil, fmt.Errorf("failed to scan transaction: %w", err)
 		}
 		
-		// Deserialize protobuf data - now correctly as Transaction (fixed in parser)
-		var pbTx pb.Transaction
-		if err := proto.Unmarshal(rawData, &pbTx); err != nil {
-			// Log error but continue with other transactions
-			fmt.Printf("⚠️ Skipping corrupted transaction at tick %d, seq %d: %v\n", 
-				tickNumber, sequenceNumber, err)
-			continue
-		}
-		
-		// Generate hash from transaction data (since it's not in protobuf)
-		hashBytes := sha256.Sum256(rawData)
-		txHash := hex.EncodeToString(hashBytes[:])
-		
-		// Convert protobuf to API format
-		tx := TransactionData{
-			TickNumber:         tickNumber,
-			SequenceNumber:     uint64(sequenceNumber),
-			Timestamp:          pbTx.Timestamp,
-			TxHash:            txHash,
-			TxID:              pbTx.TxId,
-			Nonce:             pbTx.Nonce,
-			Payload:           string(pbTx.Payload),
-			PublicKey:         hex.EncodeToString(pbTx.PublicKey),
-			Signature:         hex.EncodeToString(pbTx.Signature),
-			IngestionTimestamp: uint64(timestampUs),
-			ProcessedAt:       processedAt,
-			PayloadSize:       int32(len(pbTx.Payload)),
-			PayloadType:       "", // Set default
-			Version:           1,
-		}
 		transactions = append(transactions, tx)
 	}
 	
@@ -293,13 +276,11 @@ func (r *TimescaleDBRepository) GetChainState(ctx context.Context, tickLimit *in
 		return nil, fmt.Errorf("TimescaleDB connection not available")
 	}
 	
-	// Get chain height and total transactions
+	// Get chain height from ticks and total transactions from transactions table
 	statsQuery := `
 		SELECT 
-			COALESCE(MAX(tick_number), 0) as chain_height,
-			COALESCE(SUM(tx_count), 0) as total_transactions
-		FROM ticks 
-		WHERE version > 0`
+			COALESCE((SELECT MAX(tick_number) FROM ticks WHERE version > 0), 0) as chain_height,
+			COALESCE((SELECT COUNT(*) FROM transactions WHERE version > 0), 0) as total_transactions`
 	
 	var chainHeight, totalTransactions uint64
 	err := r.db.QueryRowContext(ctx, statsQuery).Scan(&chainHeight, &totalTransactions)
@@ -356,23 +337,31 @@ func (r *TimescaleDBRepository) GetTransaction(ctx context.Context, txHash strin
 		return nil, fmt.Errorf("TimescaleDB connection not available")
 	}
 	
+	// Query from transactions table by tx_hash (supports partial hash matching)
 	query := `
 		SELECT tick_number, sequence_number, tx_hash, tx_id, nonce,
-			   encode(payload, 'hex') as payload, timestamp_us, public_key, signature,
+			   encode(payload, 'hex') as payload, timestamp_us,
+			   encode(public_key, 'hex') as public_key, encode(signature, 'hex') as signature,
 			   ingestion_timestamp, processed_at, payload_size, payload_type, version
 		FROM transactions 
-		WHERE tx_hash = $1 AND version > 0
+		WHERE tx_hash LIKE $1 AND version > 0
+		ORDER BY processed_at DESC
 		LIMIT 1`
 	
 	var tx TransactionData
-	var timestampUs int64
-	var ingestionTimestampUs int64
+	var payloadType sql.NullString
 	
-	err := r.db.QueryRowContext(ctx, query, txHash).Scan(
+	// Support partial hash matching - if hash is short, add wildcard
+	searchPattern := txHash
+	if len(txHash) < 64 { // Full hash is 64 characters
+		searchPattern = txHash + "%"
+	}
+	
+	err := r.db.QueryRowContext(ctx, query, searchPattern).Scan(
 		&tx.TickNumber, &tx.SequenceNumber, &tx.TxHash, &tx.TxID,
-		&tx.Nonce, &tx.Payload, &timestampUs, &tx.PublicKey, &tx.Signature,
-		&ingestionTimestampUs, &tx.ProcessedAt, &tx.PayloadSize,
-		&tx.PayloadType, &tx.Version,
+		&tx.Nonce, &tx.Payload, &tx.Timestamp, &tx.PublicKey, &tx.Signature,
+		&tx.IngestionTimestamp, &tx.ProcessedAt, &tx.PayloadSize,
+		&payloadType, &tx.Version,
 	)
 	
 	if err != nil {
@@ -382,8 +371,12 @@ func (r *TimescaleDBRepository) GetTransaction(ctx context.Context, txHash strin
 		return nil, fmt.Errorf("failed to query transaction: %w", err)
 	}
 	
-	tx.Timestamp = uint64(timestampUs)
-	tx.IngestionTimestamp = uint64(ingestionTimestampUs)
+	if payloadType.Valid {
+		tx.PayloadType = payloadType.String
+	}
+	
+	// Decode payload to human-readable format
+	tx.PayloadDecoded = DecodePayload(tx.Payload)
 	
 	return &tx, nil
 }

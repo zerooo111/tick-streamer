@@ -5,22 +5,19 @@ CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;
 
 -- Create the main ticks table
 CREATE TABLE ticks (
-    tick_number         BIGINT NOT NULL,
-    height              BIGINT NOT NULL,
-    block_hash          TEXT NOT NULL,
-    parent_hash         TEXT,
-    tx_count            INTEGER NOT NULL DEFAULT 0,
-    payload_size_bytes  BIGINT NOT NULL DEFAULT 0,
-    size_bytes          BIGINT NOT NULL DEFAULT 0,
-    timestamp_us        BIGINT NOT NULL,
-    processed_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    proposer_id         TEXT,
-    proposer_key        TEXT,
-    chain_id            TEXT NOT NULL DEFAULT 'mainnet',
-    network             TEXT NOT NULL DEFAULT 'qubic',
-    version             INTEGER NOT NULL DEFAULT 1,
+    tick_number              BIGINT NOT NULL,
+    timestamp_us             BIGINT NOT NULL,
+    vdf_input                TEXT,
+    vdf_output               TEXT,
+    vdf_proof                TEXT,
+    vdf_iterations           BIGINT,
+    transaction_batch_hash   TEXT,
+    previous_output          TEXT,
+    tx_count                 INTEGER NOT NULL DEFAULT 0,
+    processed_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    version                  INTEGER NOT NULL DEFAULT 1,
     
-    PRIMARY KEY (processed_at, tick_number)
+    PRIMARY KEY (processed_at,tick_number)
 );
 
 -- Convert to hypertable partitioned by time
@@ -30,10 +27,10 @@ SELECT create_hypertable('ticks', 'processed_at',
 );
 
 -- Create indexes for common queries
-CREATE INDEX IF NOT EXISTS idx_ticks_tick_number ON ticks (tick_number);
-CREATE INDEX IF NOT EXISTS idx_ticks_block_hash ON ticks USING HASH (block_hash);
 CREATE INDEX IF NOT EXISTS idx_ticks_timestamp ON ticks (timestamp_us);
-CREATE INDEX IF NOT EXISTS idx_ticks_network_chain ON ticks (network, chain_id);
+CREATE INDEX IF NOT EXISTS idx_ticks_processed_at ON ticks (processed_at);
+CREATE INDEX IF NOT EXISTS idx_ticks_vdf_output ON ticks USING HASH (vdf_output);
+CREATE INDEX IF NOT EXISTS idx_ticks_tx_count ON ticks (tx_count);
 
 -- Add compression policy (compress chunks older than 6 hours for better storage efficiency)
 SELECT add_compression_policy('ticks', INTERVAL '6 hours', if_not_exists => TRUE);
@@ -43,15 +40,13 @@ CREATE MATERIALIZED VIEW IF NOT EXISTS ticks_hourly
 WITH (timescaledb.continuous) AS
 SELECT 
     time_bucket('1 hour', processed_at) AS hour,
-    network,
-    chain_id,
     COUNT(*) as tick_count,
     AVG(tx_count) as avg_tx_per_tick,
-    SUM(payload_size_bytes) as total_payload_bytes,
     MIN(tick_number) as min_tick_number,
-    MAX(tick_number) as max_tick_number
+    MAX(tick_number) as max_tick_number,
+    COUNT(CASE WHEN vdf_iterations > 0 THEN 1 END) as ticks_with_vdf
 FROM ticks
-GROUP BY hour, network, chain_id
+GROUP BY hour
 WITH NO DATA;
 
 -- Refresh continuous aggregate policy
