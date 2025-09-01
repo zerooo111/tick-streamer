@@ -141,6 +141,7 @@ func (s *Server) setupRoutes() {
 		{
 			me.GET("/markets", s.handler.GetMarkets)
 			me.GET("/markets/:marketId/orderbook", s.handler.GetMarketOrderbook)
+			me.GET("/markets/:marketId/trades", s.handler.GetMarketTrades)
 		}
 	}
 

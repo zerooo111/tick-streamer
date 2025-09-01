@@ -511,6 +511,44 @@ func (h *Handler) GetMarketOrderbook(c *gin.Context) {
 	c.JSON(http.StatusOK, data)
 }
 
+// Get market trades
+func (h *Handler) GetMarketTrades(c *gin.Context) {
+	marketID := middleware.SanitizeInput(c.Param("marketId"))
+
+	if marketID == "" {
+		apiErrors.BadRequestError(c, "Market ID is required")
+		return
+	}
+
+	targetURL := h.matchEngineURL + "/markets/" + url.PathEscape(marketID) + "/trades"
+
+	resp, err := h.makeSecureRequest("GET", targetURL, nil)
+	if err != nil {
+		apiErrors.InternalError(c, fmt.Errorf("failed to get market trades"))
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		apiErrors.NotFoundError(c, "Market")
+		return
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		middleware.SendErrorResponse(c, http.StatusBadGateway, "Failed to get market trades", nil)
+		return
+	}
+
+	var data interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		apiErrors.InternalError(c, err)
+		return
+	}
+
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.JSON(http.StatusOK, data)
+}
+
 // Root endpoint with API information
 func (h *Handler) Root(c *gin.Context) {
 	response := gin.H{

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 	"unicode"
@@ -84,27 +85,15 @@ func (p *TickParser) ParseTick(ctx context.Context, tick *pb.Tick) ([]*ParsedDat
 			}
 		}
 		
-		// Generate detailed logging if enabled
-		if p.enableDetailedLogging {
-			logData := p.generateDetailedLog(tick, tickRow, txRows)
-			results = append(results, logData)
-		}
+		// Note: Detailed logging removed from sink pipeline
+		// Logs should be handled separately, not sent through data persistence
 	}
 	
-	// Always generate basic stats
-	statsData := &ParsedData{
-		Type: "stats",
-		Data: map[string]interface{}{
-			"tick_number":       tick.TickNumber,
-			"timestamp":         tick.Timestamp,
-			"transaction_count": len(tick.Transactions),
-			"has_vdf_proof":     tick.VdfProof != nil,
-		},
-		Metadata: map[string]interface{}{
-			"parsed_at": time.Now(),
-		},
+	// Log stats directly instead of sending through pipeline
+	if len(tick.Transactions) > 0 {
+		log.Printf("📊 Parsed tick #%d: %d transactions, VDF proof: %t", 
+			tick.TickNumber, len(tick.Transactions), tick.VdfProof != nil)
 	}
-	results = append(results, statsData)
 	
 	return results, nil
 }
@@ -142,7 +131,7 @@ func (p *TickParser) generateDetailedLog(tick *pb.Tick, tickRow *models.TickRow,
 	var logBuilder strings.Builder
 	
 	// Header
-	logBuilder.WriteString(fmt.Sprintf("=== TICK #%d (WITH %d TRANSACTIONS) ===\n", tick.TickNumber, len(tick.Transactions)))
+	logBuilder.WriteString(fmt.Sprintf("--- TICK #%d (WITH %d TRANSACTIONS) ---\n", tick.TickNumber, len(tick.Transactions)))
 	logBuilder.WriteString(fmt.Sprintf("  Timestamp: %d (Unix microseconds)\n", tick.Timestamp))
 	logBuilder.WriteString(fmt.Sprintf("  Human Time: %s\n", time.UnixMicro(int64(tick.Timestamp)).Format("2006-01-02 15:04:05.000")))
 	logBuilder.WriteString(fmt.Sprintf("  Batch Hash: %s\n", tick.TransactionBatchHash))
@@ -183,7 +172,7 @@ func (p *TickParser) generateDetailedLog(tick *pb.Tick, tickRow *models.TickRow,
 		logBuilder.WriteString(fmt.Sprintf("    ... and %d more transactions\n", len(tick.Transactions)-maxTxToShow))
 	}
 	
-	logBuilder.WriteString(fmt.Sprintf("=== END TICK #%d ===", tick.TickNumber))
+	logBuilder.WriteString(fmt.Sprintf("--- END TICK #%d ---", tick.TickNumber))
 	
 	return &ParsedData{
 		Type: "log",

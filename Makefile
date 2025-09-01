@@ -1,7 +1,7 @@
 # Continuum Streamer Makefile
 # Essential commands for development and deployment
 
-.PHONY: help run-streamer run-api-server build clean test proto setup-env health logs
+.PHONY: help run-streamer run-api-server run-debug build clean test proto setup-env health logs
 
 # Default target
 help:
@@ -9,6 +9,7 @@ help:
 	@echo ""
 	@echo "Development:"
 	@echo "  make run-streamer   - Run the ClickHouse streamer from source"
+	@echo "  make run-debug      - Run streamer in debug mode (logs only, no DB)"
 	@echo "  make run-api-server - Run the API server from source" 
 	@echo "  make build          - Build both binaries to bin/"
 	@echo "  make clean          - Clean build artifacts"
@@ -27,6 +28,7 @@ help:
 	@echo "Examples:"
 	@echo "  make setup-env && vim .env    # Setup and configure environment"
 	@echo "  make run-streamer             # Run ClickHouse streamer"
+	@echo "  make run-debug                # Debug mode - see parsed data without DB"
 	@echo "  make run-api-server           # Run API server"
 
 # Run the ClickHouse streamer from source
@@ -38,6 +40,17 @@ run-streamer:
 		exit 1; \
 	fi
 	go run cmd/streamer/main.go
+
+# Run streamer in debug mode (logs only, no database persistence)
+run-debug:
+	@echo "🐛 Starting streamer in DEBUG MODE..."
+	@echo "📋 Debug mode: Will log parsed data without persisting to database"
+	@echo "📋 Loading configuration from .env file..."
+	@if [ ! -f ".env" ]; then \
+		echo "❌ .env file not found. Run 'make setup-env' first"; \
+		exit 1; \
+	fi
+	DEBUG_MODE=true go run cmd/streamer/main.go
 
 # Run the API server from source  
 run-api-server:

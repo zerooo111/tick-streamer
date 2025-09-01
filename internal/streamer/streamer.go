@@ -61,8 +61,9 @@ type Streamer struct {
 	lastTickTime      time.Time
 	
 	// Goroutine tracking for checkpoint saves
-	checkpointWg      sync.WaitGroup
-	checkpointWorkers int32 // atomic counter for active checkpoint workers
+	checkpointWg          sync.WaitGroup
+	checkpointWorkers     int32 // atomic counter for active checkpoint workers
+	checkpointWorkerPool  chan struct{} // Semaphore to limit concurrent checkpoint saves
 }
 
 // New creates a new Streamer instance with the given configuration
@@ -82,10 +83,18 @@ func New(cfg *config.Config) (*Streamer, error) {
 		return nil, fmt.Errorf("failed to create parser: %w", err)
 	}
 	
-	// Create sink based on configuration (only ClickHouse supported)
-	sinkConfig := sink.Config{
-		Kind:         "clickhouse", // Only ClickHouse is supported
-		MaxBatchSize: cfg.BatchRowsTx, // Use transaction batch size as max
+	// Create sink based on configuration
+	var sinkConfig sink.Config
+	if cfg.DebugMode {
+		sinkConfig = sink.Config{
+			Kind:         "debug",
+			MaxBatchSize: cfg.BatchRowsTx, // Use transaction batch size as max
+		}
+	} else {
+		sinkConfig = sink.Config{
+			Kind:         "clickhouse", // Only ClickHouse is supported for non-debug mode
+			MaxBatchSize: cfg.BatchRowsTx, // Use transaction batch size as max
+		}
 	}
 	
 	dataSink, err := sink.NewSink(sinkConfig)
@@ -124,17 +133,18 @@ func New(cfg *config.Config) (*Streamer, error) {
 	reorgDetector := validation.NewReorgDetector(128) // Keep 128 ticks for reorg detection
 	
 	return &Streamer{
-		config:          cfg,
-		parser:          dataParser,
-		sink:            dataSink,
-		batcher:         dataBatcher,
-		checkpoint:      checkpointStore,
-		retryConfig:     retryConfig,
-		circuitBreaker:  circuitBreaker,
-		componentHealth: componentHealth,
-		tickValidator:   tickValidator,
-		reorgDetector:   reorgDetector,
-		startTime:       time.Now(),
+		config:               cfg,
+		parser:               dataParser,
+		sink:                 dataSink,
+		batcher:              dataBatcher,
+		checkpoint:           checkpointStore,
+		retryConfig:          retryConfig,
+		circuitBreaker:       circuitBreaker,
+		componentHealth:      componentHealth,
+		tickValidator:        tickValidator,
+		reorgDetector:        reorgDetector,
+		startTime:            time.Now(),
+		checkpointWorkerPool: make(chan struct{}, 3), // Max 3 concurrent checkpoint saves
 	}, nil
 }
 
@@ -573,15 +583,31 @@ func (s *Streamer) processTick(ctx context.Context, tick *pb.Tick) error {
 	
 	// Save checkpoint periodically and log progress every 100 ticks
 	if s.ticksReceived%100 == 0 {
-		// Save checkpoint asynchronously to avoid blocking stream processing
-		go func(tickNum uint64) {
-			checkpointCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			defer cancel()
+		// Save checkpoint asynchronously with bounded concurrency
+		select {
+		case s.checkpointWorkerPool <- struct{}{}: // Acquire worker slot
+			s.checkpointWg.Add(1)
+			atomic.AddInt32(&s.checkpointWorkers, 1)
 			
-			if err := s.checkpoint.Save(checkpointCtx, tickNum); err != nil {
-				log.Printf("⚠️ Failed to save checkpoint for tick %d: %v", tickNum, err)
-			}
-		}(s.lastProcessedTick)
+			go func(tickNum uint64) {
+				defer func() {
+					<-s.checkpointWorkerPool // Release worker slot
+					s.checkpointWg.Done()
+					atomic.AddInt32(&s.checkpointWorkers, -1)
+				}()
+				
+				checkpointCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				defer cancel()
+				
+				if err := s.checkpoint.Save(checkpointCtx, tickNum); err != nil {
+					log.Printf("⚠️ Failed to save checkpoint for tick %d: %v", tickNum, err)
+				}
+			}(s.lastProcessedTick)
+			
+		default:
+			// Worker pool full, skip this checkpoint save to prevent blocking
+			log.Printf("⚠️ Skipping checkpoint save for tick %d - worker pool full", s.lastProcessedTick)
+		}
 		
 		elapsed := s.lastTickTime.Sub(s.startTime)
 		ticksPerSecond := float64(s.ticksReceived) / elapsed.Seconds()

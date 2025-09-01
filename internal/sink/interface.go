@@ -84,11 +84,12 @@ type Config struct {
 }
 
 // NewSink creates a sink instance based on configuration
-// Only ClickHouse is supported now
 func NewSink(cfg Config) (Sink, error) {
 	switch cfg.Kind {
 	case "clickhouse", "ch":
 		return NewClickHouseSink(cfg)
+	case "debug":
+		return NewDebugSink(cfg)
 	default:
 		return nil, ErrInvalidSinkKind
 	}

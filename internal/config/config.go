@@ -49,6 +49,9 @@ type Config struct {
 	CORSAllowCredentials bool     `env:"CORS_ALLOW_CREDENTIALS"`
 	Debug                bool     `env:"DEBUG"`
 
+	// Debug mode - when enabled, only logs parsed data without persisting
+	DebugMode bool `env:"DEBUG_MODE"`
+
 	// Logging
 	LogLevel      string `env:"LOG_LEVEL"`
 	LogDir        string `env:"LOG_DIR"`
@@ -68,43 +71,75 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("failed to load .env file: %w", err)
 	}
 
-	cfg := &Config{
-		// Load all values from environment variables (no defaults)
-		SequencerAddr:        getRequiredEnvString("SEQUENCER_ADDR"),
-		SequencerTLS:         getEnvBool("SEQUENCER_TLS", false),
-		SequencerMTLS:        getEnvBool("SEQUENCER_MTLS", false),
-		SequencerServerName:  getEnvString("SEQUENCER_SERVER_NAME", ""),
-		SequencerCACert:      getEnvString("SEQUENCER_CA_CERT", ""),
-		SequencerClientCert:  getEnvString("SEQUENCER_CLIENT_CERT", ""),
-		SequencerClientKey:   getEnvString("SEQUENCER_CLIENT_KEY", ""),
-		ClickHouseHost:       getRequiredEnvString("CLICKHOUSE_HOST"),
-		ClickHousePort:       getEnvInt("CLICKHOUSE_PORT", 9440),
-		ClickHouseDatabase:   getEnvString("CLICKHOUSE_DATABASE", "default"),
-		ClickHouseUsername:   getEnvString("CLICKHOUSE_USERNAME", "default"),
-		ClickHousePassword:   getRequiredEnvString("CLICKHOUSE_PASSWORD"),
-		CheckpointDSN:        getRequiredEnvString("CHECKPOINT_DSN"),
-		BatchRowsTx:          getEnvInt("BATCH_ROWS_TX", 20000),
-		BatchRowsTick:        getEnvInt("BATCH_ROWS_TICK", 1000),
-		BatchMaxWaitTime:     getEnvDuration("BATCH_MAX_WAIT_MS", 100*time.Millisecond),
-		RetryBackoffMin:      getEnvDuration("RETRY_BACKOFF_MIN_MS", 200*time.Millisecond),
-		RetryBackoffMax:      getEnvDuration("RETRY_BACKOFF_MAX_MS", 20000*time.Millisecond),
-		LogLevel:             getEnvString("LOG_LEVEL", "info"),
-		LogDir:               getEnvString("LOG_DIR", "./logs"),
-		LogMaxSize:           getEnvInt("LOG_MAX_SIZE", 100),      // 100MB default
-		LogMaxBackups:        getEnvInt("LOG_MAX_BACKUPS", 5),     // Keep 5 backups
-		LogMaxAge:            getEnvInt("LOG_MAX_AGE", 30),        // Keep logs for 30 days
-		LogCompress:          getEnvBool("LOG_COMPRESS", true),    // Compress old logs by default
-		LogConsole:           getEnvBool("LOG_CONSOLE", true),     // Also log to console by default
-		LogFileDisable:       getEnvBool("LOG_FILE_DISABLE", false), // File logging enabled by default
-		
-		// API server configuration - all required
-		APIPort:              getRequiredEnvString("API_PORT"),
-		RestBaseURL:          getRequiredEnvString("REST_BASE_URL"),
-		MatchEngineURL:       getRequiredEnvString("MATCH_ENGINE_URL"),
-		CORSAllowedOrigins:   getRequiredEnvStringSlice("CORS_ALLOWED_ORIGINS"),
-		CORSAllowCredentials: getEnvBool("CORS_ALLOW_CREDENTIALS", false),
-		Debug:                getEnvBool("DEBUG", false),
+	cfg := &Config{}
+	
+	// Load required environment variables with proper error handling
+	var err error
+	
+	if cfg.SequencerAddr, err = getRequiredEnvString("SEQUENCER_ADDR"); err != nil {
+		return nil, err
 	}
+	
+	// Load optional environment variables
+	cfg.SequencerTLS = getEnvBool("SEQUENCER_TLS", false)
+	cfg.SequencerMTLS = getEnvBool("SEQUENCER_MTLS", false)
+	cfg.SequencerServerName = getEnvString("SEQUENCER_SERVER_NAME", "")
+	cfg.SequencerCACert = getEnvString("SEQUENCER_CA_CERT", "")
+	cfg.SequencerClientCert = getEnvString("SEQUENCER_CLIENT_CERT", "")
+	cfg.SequencerClientKey = getEnvString("SEQUENCER_CLIENT_KEY", "")
+	
+	// Skip ClickHouse validation in debug mode
+	if !getEnvBool("DEBUG_MODE", false) {
+		if cfg.ClickHouseHost, err = getRequiredEnvString("CLICKHOUSE_HOST"); err != nil {
+			return nil, err
+		}
+		if cfg.ClickHousePassword, err = getRequiredEnvString("CLICKHOUSE_PASSWORD"); err != nil {
+			return nil, err
+		}
+	}
+	
+	cfg.ClickHousePort = getEnvInt("CLICKHOUSE_PORT", 9440)
+	cfg.ClickHouseDatabase = getEnvString("CLICKHOUSE_DATABASE", "default")
+	cfg.ClickHouseUsername = getEnvString("CLICKHOUSE_USERNAME", "default")
+	
+	if cfg.CheckpointDSN, err = getRequiredEnvString("CHECKPOINT_DSN"); err != nil {
+		return nil, err
+	}
+	
+	// Batching and retry configuration
+	cfg.BatchRowsTx = getEnvInt("BATCH_ROWS_TX", 20000)
+	cfg.BatchRowsTick = getEnvInt("BATCH_ROWS_TICK", 1000)
+	cfg.BatchMaxWaitTime = getEnvDuration("BATCH_MAX_WAIT_MS", 100*time.Millisecond)
+	cfg.RetryBackoffMin = getEnvDuration("RETRY_BACKOFF_MIN_MS", 200*time.Millisecond)
+	cfg.RetryBackoffMax = getEnvDuration("RETRY_BACKOFF_MAX_MS", 20000*time.Millisecond)
+	
+	// Logging configuration
+	cfg.LogLevel = getEnvString("LOG_LEVEL", "info")
+	cfg.LogDir = getEnvString("LOG_DIR", "./logs")
+	cfg.LogMaxSize = getEnvInt("LOG_MAX_SIZE", 100)
+	cfg.LogMaxBackups = getEnvInt("LOG_MAX_BACKUPS", 5)
+	cfg.LogMaxAge = getEnvInt("LOG_MAX_AGE", 30)
+	cfg.LogCompress = getEnvBool("LOG_COMPRESS", true)
+	cfg.LogConsole = getEnvBool("LOG_CONSOLE", true)
+	cfg.LogFileDisable = getEnvBool("LOG_FILE_DISABLE", false)
+	
+	// API server configuration - required
+	if cfg.APIPort, err = getRequiredEnvString("API_PORT"); err != nil {
+		return nil, err
+	}
+	if cfg.RestBaseURL, err = getRequiredEnvString("REST_BASE_URL"); err != nil {
+		return nil, err
+	}
+	if cfg.MatchEngineURL, err = getRequiredEnvString("MATCH_ENGINE_URL"); err != nil {
+		return nil, err
+	}
+	if cfg.CORSAllowedOrigins, err = getRequiredEnvStringSlice("CORS_ALLOWED_ORIGINS"); err != nil {
+		return nil, err
+	}
+	
+	cfg.CORSAllowCredentials = getEnvBool("CORS_ALLOW_CREDENTIALS", false)
+	cfg.Debug = getEnvBool("DEBUG", false)
+	cfg.DebugMode = getEnvBool("DEBUG_MODE", false)
 
 	// Validate required configuration
 	if err := cfg.validate(); err != nil {
@@ -125,16 +160,19 @@ func (c *Config) validate() error {
 		return fmt.Errorf("SEQUENCER_ADDR is required")
 	}
 
-	if c.ClickHouseHost == "" {
-		return fmt.Errorf("CLICKHOUSE_HOST is required")
-	}
+	// Skip ClickHouse validation in debug mode
+	if !c.DebugMode {
+		if c.ClickHouseHost == "" {
+			return fmt.Errorf("CLICKHOUSE_HOST is required")
+		}
 
-	if c.ClickHousePassword == "" {
-		return fmt.Errorf("CLICKHOUSE_PASSWORD is required")
-	}
+		if c.ClickHousePassword == "" {
+			return fmt.Errorf("CLICKHOUSE_PASSWORD is required")
+		}
 
-	if c.ClickHousePort <= 0 {
-		return fmt.Errorf("CLICKHOUSE_PORT must be positive, got: %d", c.ClickHousePort)
+		if c.ClickHousePort <= 0 {
+			return fmt.Errorf("CLICKHOUSE_PORT must be positive, got: %d", c.ClickHousePort)
+		}
 	}
 
 	if c.BatchRowsTx <= 0 {
@@ -189,11 +227,11 @@ func (c *Config) validateTLS() error {
 // Helper functions for reading environment variables with defaults
 // These demonstrate Go's approach to optional parameters using default values
 
-func getRequiredEnvString(key string) string {
+func getRequiredEnvString(key string) (string, error) {
 	if value := os.Getenv(key); value != "" {
-		return value
+		return value, nil
 	}
-	panic(fmt.Sprintf("required environment variable %s is not set", key))
+	return "", fmt.Errorf("required environment variable %s is not set", key)
 }
 
 func getEnvString(key, defaultValue string) string {
@@ -239,16 +277,16 @@ func getEnvDuration(key string, defaultValue time.Duration) time.Duration {
 	return defaultValue
 }
 
-func getRequiredEnvStringSlice(key string) []string {
+func getRequiredEnvStringSlice(key string) ([]string, error) {
 	if value := os.Getenv(key); value != "" {
 		// Split by comma and trim whitespace
 		var result []string
 		for _, item := range strings.Split(value, ",") {
 			result = append(result, strings.TrimSpace(item))
 		}
-		return result
+		return result, nil
 	}
-	panic(fmt.Sprintf("required environment variable %s is not set", key))
+	return nil, fmt.Errorf("required environment variable %s is not set", key)
 }
 
 func getEnvStringSlice(key string, defaultValue []string) []string {

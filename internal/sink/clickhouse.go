@@ -697,7 +697,7 @@ func (s *ClickHouseSink) updateStats(tickCount, txCount int, duration time.Durat
 	}
 }
 
-// GetAnalytics returns ClickHouse-specific analytics data
+// gos returns ClickHouse-specific analytics data
 func (s *ClickHouseSink) GetAnalytics(ctx context.Context, hours int) (map[string]interface{}, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
