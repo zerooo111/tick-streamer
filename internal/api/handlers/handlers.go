@@ -612,6 +612,88 @@ func (h *Handler) GetUserOrders(c *gin.Context) {
 	c.JSON(http.StatusOK, data)
 }
 
+// Get user balances
+func (h *Handler) GetUserBalances(c *gin.Context) {
+	pubkey := middleware.SanitizeInput(c.Param("pubkey"))
+
+	if pubkey == "" {
+		apiErrors.BadRequestError(c, "Public key is required")
+		return
+	}
+
+	targetURL := h.matchEngineURL + "/balances/" + url.PathEscape(pubkey)
+
+	resp, err := h.makeSecureRequest("GET", targetURL, nil)
+	if err != nil {
+		apiErrors.InternalError(c, fmt.Errorf("failed to get user balances"))
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		apiErrors.NotFoundError(c, "User balances")
+		return
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		middleware.SendErrorResponse(c, http.StatusBadGateway, "Failed to get user balances", nil)
+		return
+	}
+
+	var data interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		apiErrors.InternalError(c, err)
+		return
+	}
+
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.JSON(http.StatusOK, data)
+}
+
+// Get airdrop
+func (h *Handler) GetAirdrop(c *gin.Context) {
+	receiverPubKey := middleware.SanitizeInput(c.Param("receiverPubKey"))
+	tokenName := middleware.SanitizeInput(c.Param("tokenName"))
+
+	if receiverPubKey == "" {
+		apiErrors.BadRequestError(c, "Receiver public key is required")
+		return
+	}
+
+	if tokenName == "" {
+		apiErrors.BadRequestError(c, "Token name is required")
+		return
+	}
+
+	targetURL := h.matchEngineURL + "/airdrop/" + url.PathEscape(receiverPubKey) + "/" + url.PathEscape(tokenName)
+
+	resp, err := h.makeSecureRequest("GET", targetURL, nil)
+	if err != nil {
+		apiErrors.InternalError(c, fmt.Errorf("failed to get airdrop"))
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		apiErrors.NotFoundError(c, "Airdrop")
+		return
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		middleware.SendErrorResponse(c, http.StatusBadGateway, "Failed to get airdrop", nil)
+		return
+	}
+
+	var data interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		apiErrors.InternalError(c, err)
+		return
+	}
+
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.JSON(http.StatusOK, data)
+}
+
 // Root endpoint with API information
 func (h *Handler) Root(c *gin.Context) {
 	response := gin.H{
