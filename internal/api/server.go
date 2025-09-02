@@ -145,7 +145,7 @@ func (s *Server) setupRoutes() {
 			me.GET("/markets/:marketId/trades", s.handler.GetMarketTrades)
 			me.GET("/orders/user/:pubkey", s.handler.GetUserOrders)
 			me.GET("/balances/:pubkey", s.handler.GetUserBalances)
-			me.GET("/airdrop/:receiverPubKey/:tokenName", s.handler.GetAirdrop)
+			me.POST("/airdrop/:receiverPubKey/:tokenName", s.handler.PostAirdrop)
 		}
 	}
 

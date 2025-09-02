@@ -650,8 +650,8 @@ func (h *Handler) GetUserBalances(c *gin.Context) {
 	c.JSON(http.StatusOK, data)
 }
 
-// Get airdrop
-func (h *Handler) GetAirdrop(c *gin.Context) {
+// Post airdrop
+func (h *Handler) PostAirdrop(c *gin.Context) {
 	receiverPubKey := middleware.SanitizeInput(c.Param("receiverPubKey"))
 	tokenName := middleware.SanitizeInput(c.Param("tokenName"))
 
@@ -667,9 +667,20 @@ func (h *Handler) GetAirdrop(c *gin.Context) {
 
 	targetURL := h.matchEngineURL + "/airdrop/" + url.PathEscape(receiverPubKey) + "/" + url.PathEscape(tokenName)
 
-	resp, err := h.makeSecureRequest("GET", targetURL, nil)
+	// Read request body if any
+	var body []byte
+	if c.Request.Body != nil {
+		var err error
+		body, err = io.ReadAll(c.Request.Body)
+		if err != nil {
+			apiErrors.BadRequestError(c, "Failed to read request body")
+			return
+		}
+	}
+
+	resp, err := h.makeSecureRequest("POST", targetURL, bytes.NewReader(body))
 	if err != nil {
-		apiErrors.InternalError(c, fmt.Errorf("failed to get airdrop"))
+		apiErrors.InternalError(c, fmt.Errorf("failed to post airdrop"))
 		return
 	}
 	defer resp.Body.Close()
@@ -679,8 +690,8 @@ func (h *Handler) GetAirdrop(c *gin.Context) {
 		return
 	}
 
-	if resp.StatusCode != http.StatusOK {
-		middleware.SendErrorResponse(c, http.StatusBadGateway, "Failed to get airdrop", nil)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		middleware.SendErrorResponse(c, http.StatusBadGateway, "Failed to post airdrop", nil)
 		return
 	}
 
@@ -690,8 +701,7 @@ func (h *Handler) GetAirdrop(c *gin.Context) {
 		return
 	}
 
-	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
-	c.JSON(http.StatusOK, data)
+	c.JSON(resp.StatusCode, data)
 }
 
 // Root endpoint with API information
