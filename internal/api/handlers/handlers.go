@@ -536,6 +536,82 @@ func (h *Handler) GetMarketTrades(c *gin.Context) {
 	c.JSON(http.StatusOK, data)
 }
 
+// Get market orderbook summary
+func (h *Handler) GetMarketOrderbookSummary(c *gin.Context) {
+	marketID := middleware.SanitizeInput(c.Param("marketId"))
+
+	if marketID == "" {
+		apiErrors.BadRequestError(c, "Market ID is required")
+		return
+	}
+
+	targetURL := h.matchEngineURL + "/markets/" + url.PathEscape(marketID) + "/orderbook/summary"
+
+	resp, err := h.makeSecureRequest("GET", targetURL, nil)
+	if err != nil {
+		apiErrors.InternalError(c, fmt.Errorf("failed to get market orderbook summary"))
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		apiErrors.NotFoundError(c, "Market")
+		return
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		middleware.SendErrorResponse(c, http.StatusBadGateway, "Failed to get market orderbook summary", nil)
+		return
+	}
+
+	var data interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		apiErrors.InternalError(c, err)
+		return
+	}
+
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.JSON(http.StatusOK, data)
+}
+
+// Get user orders
+func (h *Handler) GetUserOrders(c *gin.Context) {
+	pubkey := middleware.SanitizeInput(c.Param("pubkey"))
+
+	if pubkey == "" {
+		apiErrors.BadRequestError(c, "Public key is required")
+		return
+	}
+
+	targetURL := h.matchEngineURL + "/orders/user/" + url.PathEscape(pubkey)
+
+	resp, err := h.makeSecureRequest("GET", targetURL, nil)
+	if err != nil {
+		apiErrors.InternalError(c, fmt.Errorf("failed to get user orders"))
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		apiErrors.NotFoundError(c, "User orders")
+		return
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		middleware.SendErrorResponse(c, http.StatusBadGateway, "Failed to get user orders", nil)
+		return
+	}
+
+	var data interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		apiErrors.InternalError(c, err)
+		return
+	}
+
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.JSON(http.StatusOK, data)
+}
+
 // Root endpoint with API information
 func (h *Handler) Root(c *gin.Context) {
 	response := gin.H{
@@ -554,6 +630,9 @@ func (h *Handler) Root(c *gin.Context) {
 			"websocket":        "/ws/ticks",
 			"markets":          "/api/v1/me/markets",
 			"market_orderbook": "/api/v1/me/markets/{marketId}/orderbook",
+			"market_orderbook_summary": "/api/v1/me/markets/{marketId}/orderbook/summary",
+			"market_trades":    "/api/v1/me/markets/{marketId}/trades",
+			"user_orders":      "/api/v1/me/orders/user/{pubkey}",
 		},
 	}
 
