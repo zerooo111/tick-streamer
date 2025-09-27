@@ -1,6 +1,7 @@
 module github.com/zerooo111/tick-streamer
 
-go 1.24
+go 1.22.2
+
 
 require (
 	github.com/gin-gonic/gin v1.10.1
