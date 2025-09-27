@@ -69,6 +69,7 @@ type TransactionRequest struct {
 	TimestampStr string `json:"timestamp" binding:"required"`
 }
 
+
 // ToProtobuf converts the request to a protobuf transaction
 func (tr *TransactionRequest) ToProtobuf() (*pb.Transaction, error) {
 	// Convert hex signature to bytes
@@ -650,6 +651,180 @@ func (h *Handler) GetUserBalances(c *gin.Context) {
 	c.JSON(http.StatusOK, data)
 }
 
+
+// Get user accounts (full account summary)
+func (h *Handler) GetUserAccounts(c *gin.Context) {
+	pubkey := middleware.SanitizeInput(c.Param("pubkey"))
+
+	if pubkey == "" {
+		apiErrors.BadRequestError(c, "Public key is required")
+		return
+	}
+
+	targetURL := h.matchEngineURL + "/accounts/" + url.PathEscape(pubkey)
+
+	resp, err := h.makeSecureRequest("GET", targetURL, nil)
+	if err != nil {
+		apiErrors.InternalError(c, fmt.Errorf("failed to get user accounts"))
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		apiErrors.NotFoundError(c, "User accounts")
+		return
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		middleware.SendErrorResponse(c, http.StatusBadGateway, "Failed to get user accounts", nil)
+		return
+	}
+
+	var data interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		apiErrors.InternalError(c, err)
+		return
+	}
+
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.JSON(http.StatusOK, data)
+}
+
+// Get positions (position snapshots)
+func (h *Handler) GetPositions(c *gin.Context) {
+	targetURL := h.matchEngineURL + "/positions"
+
+	// Add optional owner query parameter
+	owner := c.Query("owner")
+	if owner != "" {
+		targetURL += "?owner=" + url.QueryEscape(owner)
+	}
+
+	resp, err := h.makeSecureRequest("GET", targetURL, nil)
+	if err != nil {
+		apiErrors.InternalError(c, fmt.Errorf("failed to get positions"))
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		middleware.SendErrorResponse(c, http.StatusBadGateway, "Failed to get positions", nil)
+		return
+	}
+
+	var data interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		apiErrors.InternalError(c, err)
+		return
+	}
+
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.JSON(http.StatusOK, data)
+}
+
+
+// Get liquidations
+func (h *Handler) GetLiquidations(c *gin.Context) {
+	targetURL := h.matchEngineURL + "/liquidations"
+
+	resp, err := h.makeSecureRequest("GET", targetURL, nil)
+	if err != nil {
+		apiErrors.InternalError(c, fmt.Errorf("failed to get liquidations"))
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		middleware.SendErrorResponse(c, http.StatusBadGateway, "Failed to get liquidations", nil)
+		return
+	}
+
+	var data interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		apiErrors.InternalError(c, err)
+		return
+	}
+
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.JSON(http.StatusOK, data)
+}
+
+// Get market stats
+func (h *Handler) GetMarketStats(c *gin.Context) {
+	marketUUID := middleware.SanitizeInput(c.Param("marketId"))
+
+	if marketUUID == "" {
+		apiErrors.BadRequestError(c, "Market UUID is required")
+		return
+	}
+
+	targetURL := h.matchEngineURL + "/markets/" + url.PathEscape(marketUUID) + "/stats"
+
+	resp, err := h.makeSecureRequest("GET", targetURL, nil)
+	if err != nil {
+		apiErrors.InternalError(c, fmt.Errorf("failed to get market stats"))
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		apiErrors.NotFoundError(c, "Market stats")
+		return
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		middleware.SendErrorResponse(c, http.StatusBadGateway, "Failed to get market stats", nil)
+		return
+	}
+
+	var data interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		apiErrors.InternalError(c, err)
+		return
+	}
+
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.JSON(http.StatusOK, data)
+}
+
+// Get user PNL
+func (h *Handler) GetUserPNL(c *gin.Context) {
+	ownerPubkey := middleware.SanitizeInput(c.Param("pubkey"))
+
+	if ownerPubkey == "" {
+		apiErrors.BadRequestError(c, "Owner public key is required")
+		return
+	}
+
+	targetURL := h.matchEngineURL + "/users/" + url.PathEscape(ownerPubkey) + "/pnl"
+
+	resp, err := h.makeSecureRequest("GET", targetURL, nil)
+	if err != nil {
+		apiErrors.InternalError(c, fmt.Errorf("failed to get user PNL"))
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		apiErrors.NotFoundError(c, "User PNL")
+		return
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		middleware.SendErrorResponse(c, http.StatusBadGateway, "Failed to get user PNL", nil)
+		return
+	}
+
+	var data interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		apiErrors.InternalError(c, err)
+		return
+	}
+
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.JSON(http.StatusOK, data)
+}
+
 // Post airdrop
 func (h *Handler) PostAirdrop(c *gin.Context) {
 	receiverPubKey := middleware.SanitizeInput(c.Param("receiverPubKey"))
@@ -712,6 +887,7 @@ func (h *Handler) Root(c *gin.Context) {
 		"endpoints": gin.H{
 			"health":           "/api/v1/health",
 			"status":           "/api/v1/status",
+			"sequencer_status": "/api/v1/sequencer/status",
 			"transaction":      "/api/v1/tx/{hash}",
 			"recent_transactions": "/api/v1/tx/recent",
 			"submit_transaction": "/api/v1/tx",
@@ -721,10 +897,20 @@ func (h *Handler) Root(c *gin.Context) {
 			"chain_state":      "/api/v1/chain/state",
 			"websocket":        "/ws/ticks",
 			"markets":          "/api/v1/me/markets",
+			"create_market":    "/api/v1/me/markets",
 			"market_orderbook": "/api/v1/me/markets/{marketId}/orderbook",
 			"market_orderbook_summary": "/api/v1/me/markets/{marketId}/orderbook/summary",
 			"market_trades":    "/api/v1/me/markets/{marketId}/trades",
+			"market_stats":     "/api/v1/me/markets/{marketId}/stats",
 			"user_orders":      "/api/v1/me/orders/user/{pubkey}",
+			"user_balances":    "/api/v1/me/balances/{pubkey}",
+			"user_accounts":    "/api/v1/me/accounts/{pubkey}",
+			"user_pnl":         "/api/v1/me/users/{pubkey}/pnl",
+			"positions":        "/api/v1/me/positions",
+			"margin_deposit":   "/api/v1/me/margin/deposit",
+			"margin_withdraw":  "/api/v1/me/margin/withdraw",
+			"airdrop":          "/api/v1/me/airdrop/{receiverPubKey}/{tokenName}",
+			"liquidations":     "/api/v1/me/liquidations",
 		},
 	}
 

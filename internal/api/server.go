@@ -143,8 +143,11 @@ func (s *Server) setupRoutes() {
 			me.GET("/markets/:marketId/orderbook", s.handler.GetMarketOrderbook)
 			me.GET("/markets/:marketId/orderbook/summary", s.handler.GetMarketOrderbookSummary)
 			me.GET("/markets/:marketId/trades", s.handler.GetMarketTrades)
+			me.GET("/markets/:marketId/stats", s.handler.GetMarketStats)
 			me.GET("/orders/user/:pubkey", s.handler.GetUserOrders)
 			me.GET("/balances/:pubkey", s.handler.GetUserBalances)
+			me.GET("/accounts/:pubkey", s.handler.GetUserAccounts)
+			me.GET("/users/:pubkey/pnl", s.handler.GetUserPNL)
 			me.POST("/airdrop/:receiverPubKey/:tokenName", s.handler.PostAirdrop)
 		}
 	}
