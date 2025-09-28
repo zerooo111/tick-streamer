@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
-	
+
 	"github.com/zerooo111/tick-streamer/internal/config"
 )
 
@@ -58,6 +58,14 @@ type ChainStateData struct {
 	TotalTransactions string               `json:"total_transactions"`
 	RecentTicks      []TickData            `json:"recent_ticks"`
 	TxToTickSample   map[string]string     `json:"tx_to_tick_sample"`
+}
+
+type OHLCCandle struct {
+	Timestamp time.Time `json:"t"` // timestamp
+	Open      float64   `json:"o"` // open price
+	High      float64   `json:"h"` // high price
+	Low       float64   `json:"l"` // low price
+	Close     float64   `json:"c"` // close price
 }
 
 // DecodePayload decodes a hex-encoded payload into human-readable format
@@ -116,6 +124,7 @@ type Repository interface {
 	GetRecentTransactions(ctx context.Context, limit int) ([]RecentTransactionData, error)
 	GetChainState(ctx context.Context, tickLimit *int) (*ChainStateData, error)
 	GetTransaction(ctx context.Context, txHash string) (*TransactionData, error)
+	GetMarketCandles(ctx context.Context, marketID string, timeframe string, from, to time.Time) ([]OHLCCandle, error)
 	Close() error
 }
 

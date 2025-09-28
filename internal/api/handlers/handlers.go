@@ -886,13 +886,15 @@ func (h *Handler) Root(c *gin.Context) {
 			"tick":             "/api/v1/tick/{number}",
 			"recent_ticks":     "/api/v1/ticks/recent",
 			"chain_state":      "/api/v1/chain/state",
-			"websocket":        "/ws/ticks",
+			"websocket_ticks":  "/ws/ticks",
+			"websocket_market_stats": "/ws/market-stats",
 			"markets":          "/api/v1/me/markets",
 			"create_market":    "/api/v1/me/markets",
 			"market_orderbook": "/api/v1/me/markets/{marketId}/orderbook",
 			"market_orderbook_summary": "/api/v1/me/markets/{marketId}/orderbook/summary",
 			"market_trades":    "/api/v1/me/markets/{marketId}/trades",
 			"market_stats":     "/api/v1/me/markets/{marketId}/stats",
+			"market_candles":   "/api/v1/me/markets/{marketId}/candles?tf=1h&from=ISO&to=ISO",
 			"user_orders":      "/api/v1/me/orders/user/{pubkey}",
 			"user_balances":    "/api/v1/me/balances/{pubkey}",
 			"user_accounts":    "/api/v1/me/accounts/{pubkey}",
@@ -906,6 +908,116 @@ func (h *Handler) Root(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, response)
+}
+
+// GetMarketCandles retrieves OHLC candles for a market
+func (h *Handler) GetMarketCandles(c *gin.Context) {
+	marketID := middleware.SanitizeInput(c.Param("marketId"))
+	if marketID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"data":       nil,
+			"statusCode": http.StatusBadRequest,
+			"error":      "Market ID is required",
+		})
+		return
+	}
+
+	// Parse and validate timeframe
+	timeframe := c.Query("tf")
+	if timeframe == "" {
+		timeframe = "1h" // default timeframe
+	}
+	
+	// Validate timeframe
+	allowedTimeframes := map[string]bool{
+		"1m": true, "5m": true, "15m": true, 
+		"1h": true, "4h": true, "1d": true,
+	}
+	if !allowedTimeframes[timeframe] {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"data":       nil,
+			"statusCode": http.StatusBadRequest,
+			"error":      "Invalid timeframe. Allowed values: 1m, 5m, 15m, 1h, 4h, 1d",
+		})
+		return
+	}
+
+	// Parse from/to dates
+	var from, to time.Time
+	var err error
+
+	if fromStr := c.Query("from"); fromStr != "" {
+		from, err = time.Parse(time.RFC3339, fromStr)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"data":       nil,
+				"statusCode": http.StatusBadRequest,
+				"error":      "Invalid 'from' date format. Use RFC3339 format (e.g., 2023-01-01T00:00:00Z)",
+			})
+			return
+		}
+	} else {
+		// Default to 24 hours ago if no 'from' specified
+		from = time.Now().UTC().Add(-24 * time.Hour)
+	}
+
+	if toStr := c.Query("to"); toStr != "" {
+		to, err = time.Parse(time.RFC3339, toStr)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"data":       nil,
+				"statusCode": http.StatusBadRequest,
+				"error":      "Invalid 'to' date format. Use RFC3339 format (e.g., 2023-01-01T00:00:00Z)",
+			})
+			return
+		}
+	} else {
+		// Default to now if no 'to' specified
+		to = time.Now().UTC()
+	}
+
+	// Validate date range
+	if from.After(to) {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"data":       nil,
+			"statusCode": http.StatusBadRequest,
+			"error":      "'from' date must be before 'to' date",
+		})
+		return
+	}
+
+	// Limit date range to prevent excessive queries
+	if to.Sub(from) > 30*24*time.Hour {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"data":       nil,
+			"statusCode": http.StatusBadRequest,
+			"error":      "Date range cannot exceed 30 days",
+		})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Query candles from repository
+	candles, err := h.repository.GetMarketCandles(ctx, marketID, timeframe, from, to)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"data":       nil,
+			"statusCode": http.StatusInternalServerError,
+			"error":      "Failed to get market candles",
+		})
+		return
+	}
+
+	// Set caching headers as specified
+	c.Header("Cache-Control", "public, max-age=5")
+	c.Header("X-Data-Source", "database")
+	
+	c.JSON(http.StatusOK, gin.H{
+		"data":       candles,
+		"statusCode": http.StatusOK,
+	})
 }
 
 // Helper function to make secure HTTP requests

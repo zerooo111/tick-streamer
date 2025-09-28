@@ -13,18 +13,16 @@ import (
 	"github.com/zerooo111/tick-streamer/internal/api/handlers"
 	"github.com/zerooo111/tick-streamer/internal/api/middleware"
 	"github.com/zerooo111/tick-streamer/internal/api/repository"
-	"github.com/zerooo111/tick-streamer/internal/api/websocket"
 	"github.com/zerooo111/tick-streamer/internal/config"
 )
 
 type Server struct {
-	router     *gin.Engine
-	httpServer *http.Server
-	handler    *handlers.Handler
-	wsHub      *websocket.Hub
-	config     *config.Config
-	repository repository.Repository
-	logWriter  *middleware.LogWriter
+	router         *gin.Engine
+	httpServer     *http.Server
+	handler        *handlers.Handler
+	config         *config.Config
+	repository     repository.Repository
+	logWriter      *middleware.LogWriter
 }
 
 func NewServer(cfg *config.Config) (*Server, error) {
@@ -56,12 +54,6 @@ func NewServer(cfg *config.Config) (*Server, error) {
 		return nil, fmt.Errorf("failed to create handlers: %w", err)
 	}
 
-	// Create WebSocket hub with allowed origins from config
-	wsHub, err := websocket.NewHub(cfg.SequencerAddr, cfg.CORSAllowedOrigins)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create WebSocket hub: %w", err)
-	}
-
 	// Set Gin mode based on debug setting
 	if !cfg.Debug {
 		gin.SetMode(gin.ReleaseMode)
@@ -71,12 +63,11 @@ func NewServer(cfg *config.Config) (*Server, error) {
 	router := gin.New()
 
 	s := &Server{
-		router:     router,
-		handler:    handler,
-		wsHub:      wsHub,
-		config:     cfg,
-		repository: repo,
-		logWriter:  logWriter,
+		router:         router,
+		handler:        handler,
+		config:         cfg,
+		repository:     repo,
+		logWriter:      logWriter,
 	}
 
 	s.setupMiddleware()
@@ -144,6 +135,7 @@ func (s *Server) setupRoutes() {
 			me.GET("/markets/:marketId/orderbook/summary", s.handler.GetMarketOrderbookSummary)
 			me.GET("/markets/:marketId/trades", s.handler.GetMarketTrades)
 			me.GET("/markets/:marketId/stats", s.handler.GetMarketStats)
+			me.GET("/markets/:marketId/candles", s.handler.GetMarketCandles)
 			me.GET("/orders/user/:pubkey", s.handler.GetUserOrders)
 			me.GET("/balances/:pubkey", s.handler.GetUserBalances)
 			me.GET("/accounts/:pubkey", s.handler.GetUserAccounts)
@@ -151,9 +143,6 @@ func (s *Server) setupRoutes() {
 			me.POST("/airdrop/:receiverPubKey/:tokenName", s.handler.PostAirdrop)
 		}
 	}
-
-	// WebSocket route
-	s.router.GET("/ws/ticks", s.wsHub.HandleWebSocket)
 }
 
 func (s *Server) Start() error {
@@ -170,7 +159,6 @@ func (s *Server) Start() error {
 
 	log.Printf("🚀 Starting fermi-explorer-go-backend...")
 	log.Printf("🌐 REST API: http://localhost%s/api/v1", addr)
-	log.Printf("🔌 WebSocket: ws://localhost%s/ws/ticks", addr)
 	log.Printf("📡 Proxying gRPC from: %s", s.config.SequencerAddr)
 	log.Printf("🔗 Proxying REST from: %s", s.config.RestBaseURL)
 	log.Printf("🎯 Proxying Match Engine from: %s", s.config.MatchEngineURL)
@@ -191,13 +179,6 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if err := s.httpServer.Shutdown(ctx); err != nil {
 		log.Printf("HTTP server shutdown error: %v", err)
 		return err
-	}
-
-	// Shutdown WebSocket hub
-	if s.wsHub != nil {
-		log.Println("🔌 Shutting down WebSocket hub...")
-		s.wsHub.Shutdown()
-		log.Println("✅ WebSocket hub shutdown complete")
 	}
 
 	// Close handlers

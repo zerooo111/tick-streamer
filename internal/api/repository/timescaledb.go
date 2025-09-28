@@ -9,7 +9,7 @@ import (
 	"time"
 
 	_ "github.com/lib/pq" // PostgreSQL driver
-	
+
 	"github.com/zerooo111/tick-streamer/internal/config"
 )
 
@@ -404,4 +404,78 @@ func getTSEnvOrDefaultInt(key string, defaultValue int) int {
 		}
 	}
 	return defaultValue
+}
+
+// GetMarketCandles retrieves gap-filled OHLC candles for a market
+func (r *TimescaleDBRepository) GetMarketCandles(ctx context.Context, marketID string, timeframe string, from, to time.Time) ([]OHLCCandle, error) {
+	if r.db == nil {
+		return nil, fmt.Errorf("database connection not available")
+	}
+
+	// Validate timeframe and convert to interval
+	interval, err := parseTimeframe(timeframe)
+	if err != nil {
+		return nil, fmt.Errorf("invalid timeframe: %w", err)
+	}
+
+	// Use gap-filled OHLC query from specification
+	query := `
+		WITH buckets AS (
+			SELECT time_bucket_gapfill($1::interval, ts, start => $3, finish => $4) AS bucket,
+				   ts,
+				   price
+			FROM market_prices
+			WHERE market_id = $2 AND ts >= $3 - $1::interval AND ts < $4
+		)
+		SELECT
+			bucket AS t,
+			first(price, ts) AS o,
+			max(price)       AS h,
+			min(price)       AS l,
+			last(price, ts)  AS c
+		FROM buckets
+		GROUP BY bucket
+		ORDER BY bucket ASC`
+
+	rows, err := r.db.QueryContext(ctx, query, interval, marketID, from, to)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query market candles: %w", err)
+	}
+	defer rows.Close()
+
+	var candles []OHLCCandle
+	for rows.Next() {
+		var candle OHLCCandle
+		err := rows.Scan(&candle.Timestamp, &candle.Open, &candle.High, &candle.Low, &candle.Close)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan candle row: %w", err)
+		}
+		candles = append(candles, candle)
+	}
+
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating candle rows: %w", err)
+	}
+
+	return candles, nil
+}
+
+// parseTimeframe converts timeframe string to PostgreSQL interval
+func parseTimeframe(tf string) (string, error) {
+	switch tf {
+	case "1m":
+		return "1 minute", nil
+	case "5m":
+		return "5 minutes", nil
+	case "15m":
+		return "15 minutes", nil
+	case "1h":
+		return "1 hour", nil
+	case "4h":
+		return "4 hours", nil
+	case "1d":
+		return "1 day", nil
+	default:
+		return "", fmt.Errorf("unsupported timeframe: %s", tf)
+	}
 }

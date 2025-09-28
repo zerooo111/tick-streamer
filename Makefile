@@ -1,7 +1,7 @@
 # Continuum Streamer Makefile
 # Essential commands for development and deployment
 
-.PHONY: help run-streamer run-api-server run-debug build clean test proto setup-env health logs
+.PHONY: help run-streamer run-api-server run-ingestor run-debug build clean test proto setup-env health logs
 
 # Default target
 help:
@@ -10,7 +10,8 @@ help:
 	@echo "Development:"
 	@echo "  make run-streamer   - Run the streamer from source"
 	@echo "  make run-debug      - Run streamer in debug mode (logs only, no DB)"
-	@echo "  make run-api-server - Run the API server from source" 
+	@echo "  make run-api-server - Run the API server from source"
+	@echo "  make run-ingestor   - Run the market price ingestor from source"
 	@echo "  make build          - Build both binaries to bin/"
 	@echo "  make clean          - Clean build artifacts"
 	@echo ""
@@ -30,6 +31,7 @@ help:
 	@echo "  make run-streamer             # Run streamer"
 	@echo "  make run-debug                # Debug mode - see parsed data without DB"
 	@echo "  make run-api-server           # Run API server"
+	@echo "  make run-ingestor             # Run market price ingestor"
 
 # Run the streamer from source
 run-streamer:
@@ -62,6 +64,18 @@ run-api-server:
 	fi
 	go run cmd/api-server/main.go
 
+# Run the market price ingestor from source
+run-ingestor:
+	@echo "🚀 Starting market price ingestor..."
+	@echo "📋 Loading configuration from .env file..."
+	@if [ ! -f ".env" ]; then \
+		echo "❌ .env file not found. Run 'make setup-env' first"; \
+		exit 1; \
+	fi
+	@echo "📊 This will poll markets and ingest perp prices to TimescaleDB"
+	@echo "📊 Make sure your market_prices table exists in TimescaleDB"
+	go run cmd/ingestor/main.go
+
 # Watch log files in real-time (or suggest stdout monitoring if disabled)
 logs:
 	@echo "👀 Checking for log files..."
@@ -80,7 +94,8 @@ build:
 	@mkdir -p bin
 	go build -o bin/streamer cmd/streamer/main.go
 	go build -o bin/api-server cmd/api-server/main.go
-	@echo "✅ Binaries built: bin/streamer, bin/api-server"
+	go build -o bin/ingestor cmd/ingestor/main.go
+	@echo "✅ Binaries built: bin/streamer, bin/api-server, bin/ingestor"
 
 # Clean build artifacts
 clean:

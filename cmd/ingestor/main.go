@@ -12,70 +12,91 @@ import (
 
 	_ "github.com/lib/pq"
 
+	"github.com/zerooo111/tick-streamer/internal/config"
 	"github.com/zerooo111/tick-streamer/internal/ingestor"
 )
 
 func main() {
-  baseURL := mustGetenv("REST_BASE_URL")
-	marketID := mustGetenv("MARKET_ID")
+	log.Println("🚀 Starting market price ingestor...")
+	
+	// Load configuration from .env file
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatalf("❌ Failed to load configuration: %v", err)
+	}
+	
+	log.Printf("📡 REST Base URL: %s", cfg.MatchEngineURL)
 
-	// Build TimescaleDB connection string from existing env vars (or use full connection string if provided)
+	// Build TimescaleDB connection string from config
 	connStr := os.Getenv("TIMESCALEDB_CONNECTION_STRING")
 	if connStr == "" {
-		host := getenv("TIMESCALEDB_HOST", "localhost")
-		port := getenv("TIMESCALEDB_PORT", "5432")
-		database := getenv("TIMESCALEDB_DATABASE", "tick_streamer")
-		username := getenv("TIMESCALEDB_USERNAME", "postgres")
-		password := getenv("TIMESCALEDB_PASSWORD", "")
-		sslMode := getenv("TIMESCALEDB_SSL_MODE", "prefer")
-		connStr = fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=%s", host, port, username, password, database, sslMode)
+		connStr = fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s", 
+			cfg.TimescaleDBHost, cfg.TimescaleDBPort, cfg.TimescaleDBUsername, 
+			cfg.TimescaleDBPassword, cfg.TimescaleDBDatabase, cfg.TimescaleDBSSLMode)
+		log.Printf("🔗 Built connection string from config")
+	} else {
+		log.Printf("🔗 Using provided connection string")
 	}
 
+	log.Printf("🗄️ Connecting to TimescaleDB...")
 	db, err := sql.Open("postgres", connStr)
 	if err != nil {
-		log.Fatalf("failed to open db: %v", err)
+		log.Fatalf("❌ Failed to open database connection: %v", err)
 	}
-	defer db.Close()
+	defer func() {
+		if err := db.Close(); err != nil {
+			log.Printf("⚠️ Error closing database: %v", err)
+		} else {
+			log.Println("✅ Database connection closed")
+		}
+	}()
 
+	log.Printf("🏓 Testing database connection...")
 	if err := pingWithTimeout(db, 10*time.Second); err != nil {
-		log.Fatalf("failed to ping db: %v", err)
+		log.Fatalf("❌ Failed to ping database: %v", err)
+	}
+	log.Println("✅ Database connection successful")
+
+	interval := getDuration("INGEST_INTERVAL", time.Second)
+	heartbeat := getDuration("HEARTBEAT_INTERVAL", 30*time.Second)
+	httpTimeout := getDuration("HTTP_TIMEOUT", 3*time.Second)
+	
+	log.Printf("⚙️ Configuration:")
+	log.Printf("   - Ingest interval: %v", interval)
+	log.Printf("   - Heartbeat interval: %v", heartbeat)
+	log.Printf("   - HTTP timeout: %v", httpTimeout)
+
+	opts := ingestor.IngestorOptions{
+		Interval:          interval,
+		HeartbeatInterval: heartbeat,
+		HTTPTimeout:       httpTimeout,
 	}
 
-    opts := ingestor.IngestorOptions{
-        Interval:          getDuration("INGEST_INTERVAL", time.Second),
-        HeartbeatInterval: getDuration("HEARTBEAT_INTERVAL", 30*time.Second),
-        HTTPTimeout:       getDuration("HTTP_TIMEOUT", 3*time.Second),
-    }
-
-	ing, err := ingestor.NewPriceIngestor(db, baseURL, marketID, opts)
+	log.Printf("🔧 Initializing price ingestor...")
+	ing, err := ingestor.NewPriceIngestor(db, cfg.MatchEngineURL, "", opts)
 	if err != nil {
-		log.Fatalf("failed to init ingestor: %v", err)
+		log.Fatalf("❌ Failed to initialize ingestor: %v", err)
 	}
-	defer ing.Stop()
+	defer func() {
+		log.Println("🛑 Stopping ingestor...")
+		ing.Stop()
+		log.Println("✅ Ingestor stopped")
+	}()
 
+	log.Println("🎯 Starting price ingestion...")
 	ctx, cancel := context.WithCancel(context.Background())
 	go ing.Start(ctx)
 
+	log.Println("✅ Ingestor started successfully. Press Ctrl+C to stop.")
 	waitForSignal()
+	
+	log.Println("🛑 Shutdown signal received...")
 	cancel()
 	// Allow a brief shutdown period
 	time.Sleep(300 * time.Millisecond)
+	log.Println("🏁 Shutdown complete")
 }
 
-func getenv(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
-}
-
-func mustGetenv(key string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	log.Fatalf("missing required env: %s", key)
-	return ""
-}
 
 func getDuration(key string, def time.Duration) time.Duration {
 	if v := os.Getenv(key); v != "" {
@@ -86,16 +107,6 @@ func getDuration(key string, def time.Duration) time.Duration {
 	return def
 }
 
-func getFloat(key string, def float64) float64 {
-	if v := os.Getenv(key); v != "" {
-		var f float64
-		_, err := fmt.Sscan(v, &f)
-		if err == nil {
-			return f
-		}
-	}
-	return def
-}
 
 func pingWithTimeout(db *sql.DB, timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
