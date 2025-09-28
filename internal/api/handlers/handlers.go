@@ -409,17 +409,8 @@ func (h *Handler) GetChainState(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Try database first
-	chainState, err := h.repository.GetChainState(ctx, tickLimit)
-	if err == nil {
-		c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
-		c.Header("X-Data-Source", "database")
-		c.JSON(http.StatusOK, chainState)
-		return
-	}
-
-	// Fallback to gRPC
 	var grpcTickLimit uint32
+
 	if tickLimit != nil {
 		grpcTickLimit = uint32(*tickLimit)
 	}
