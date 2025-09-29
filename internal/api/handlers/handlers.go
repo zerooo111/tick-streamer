@@ -112,17 +112,26 @@ func (h *Handler) Health(c *gin.Context) {
 
 // Sequencer status endpoint
 func (h *Handler) Status(c *gin.Context) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	resp, err := h.grpcClient.GetStatus(ctx, &pb.GetStatusRequest{})
+	resp, err := h.makeSecureRequest("GET", h.restBaseURL+"/status", nil)
 	if err != nil {
 		middleware.SendErrorResponse(c, http.StatusServiceUnavailable, "Failed to get status from sequencer", nil)
 		return
 	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		middleware.SendErrorResponse(c, http.StatusServiceUnavailable, "Failed to get status from sequencer", nil)
+		return
+	}
+
+	var data interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		middleware.SendErrorResponse(c, http.StatusInternalServerError, "Failed to decode status response", nil)
+		return
+	}
 
 	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
-	c.JSON(http.StatusOK, resp)
+	c.JSON(http.StatusOK, data)
 }
 
 // Get transaction by hash
