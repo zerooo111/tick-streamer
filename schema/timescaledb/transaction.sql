@@ -28,13 +28,18 @@ SELECT create_hypertable('transactions', 'processed_at',
 );
 
 
--- Create indexes for common queries
-CREATE INDEX IF NOT EXISTS idx_transactions_tick_number ON transactions (tick_number);
+-- ESSENTIAL INDEXES ONLY - based on actual query patterns
+-- 1. For GetTransaction() - queries by tx_hash with LIKE pattern
 CREATE INDEX IF NOT EXISTS idx_transactions_tx_hash ON transactions USING HASH (tx_hash);
-CREATE INDEX IF NOT EXISTS idx_transactions_tx_id ON transactions USING HASH (tx_id);
-CREATE INDEX IF NOT EXISTS idx_transactions_timestamp ON transactions (timestamp_us);
-CREATE INDEX IF NOT EXISTS idx_transactions_processed_at ON transactions (processed_at);
-CREATE INDEX IF NOT EXISTS idx_transactions_payload_type ON transactions (payload_type);
+
+-- 2. For GetTick() - queries transactions by tick_number  
+CREATE INDEX IF NOT EXISTS idx_transactions_tick_number ON transactions (tick_number);
+
+-- REMOVED UNNECESSARY INDEXES:
+-- - idx_transactions_tx_id (not used in queries)
+-- - idx_transactions_timestamp (not used in queries) 
+-- - idx_transactions_processed_at (covered by primary key)
+-- - idx_transactions_payload_type (not used in queries)
 
 -- Add aggressive compression policy (compress chunks older than 2 hours due to high volume)
 SELECT add_compression_policy('transactions', INTERVAL '2 hours', if_not_exists => TRUE);

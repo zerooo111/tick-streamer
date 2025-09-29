@@ -26,11 +26,15 @@ SELECT create_hypertable('ticks', 'processed_at',
     if_not_exists => TRUE
 );
 
--- Create indexes for common queries
-CREATE INDEX IF NOT EXISTS idx_ticks_timestamp ON ticks (timestamp_us);
-CREATE INDEX IF NOT EXISTS idx_ticks_processed_at ON ticks (processed_at);
-CREATE INDEX IF NOT EXISTS idx_ticks_vdf_output ON ticks USING HASH (vdf_output);
-CREATE INDEX IF NOT EXISTS idx_ticks_tx_count ON ticks (tx_count);
+-- ESSENTIAL INDEXES ONLY - based on actual query patterns
+-- 1. For GetTick() - queries by tick_number
+CREATE INDEX IF NOT EXISTS idx_ticks_tick_number ON ticks (tick_number);
+
+-- REMOVED UNNECESSARY INDEXES:
+-- - idx_ticks_timestamp (not used in queries)
+-- - idx_ticks_processed_at (covered by primary key)
+-- - idx_ticks_vdf_output (not used in queries)
+-- - idx_ticks_tx_count (not used in queries)
 
 -- Add compression policy (compress chunks older than 6 hours for better storage efficiency)
 SELECT add_compression_policy('ticks', INTERVAL '6 hours', if_not_exists => TRUE);
