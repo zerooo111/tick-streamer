@@ -401,7 +401,7 @@ func (h *Handler) GetRecentTransactions(c *gin.Context) {
 	})
 }
 
-// Get chain state
+// Get chain state (proxies to gRPC GetChainState)
 func (h *Handler) GetChainState(c *gin.Context) {
 	tickLimitStr := c.Query("tick_limit")
 	var tickLimit *int
@@ -429,6 +429,22 @@ func (h *Handler) GetChainState(c *gin.Context) {
 	})
 	if err != nil {
 		middleware.SendErrorResponse(c, http.StatusServiceUnavailable, "Failed to get chain state from sequencer", nil)
+		return
+	}
+
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.Header("X-Data-Source", "grpc")
+	c.JSON(http.StatusOK, resp)
+}
+
+// Get sequencer status (proxies to gRPC GetStatus)
+func (h *Handler) GetSequencerStatus(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	resp, err := h.grpcClient.GetStatus(ctx, &pb.GetStatusRequest{})
+	if err != nil {
+		middleware.SendErrorResponse(c, http.StatusServiceUnavailable, "Failed to get status from sequencer", nil)
 		return
 	}
 

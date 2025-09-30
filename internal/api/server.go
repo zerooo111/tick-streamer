@@ -124,8 +124,9 @@ func (s *Server) setupRoutes() {
 		v1.GET("/tick/:number", s.handler.GetTick)
 		v1.GET("/ticks/recent", s.handler.GetRecentTicks)
 
-		// Chain state route
+		// Chain state routes
 		v1.GET("/chain/state", s.handler.GetChainState)
+		v1.GET("/chain-state", s.handler.GetSequencerStatus)
 
 		// Market routes (proxy to match engine)
 		me := v1.Group("/me")
