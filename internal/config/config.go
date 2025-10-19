@@ -51,6 +51,7 @@ type Config struct {
 	APIPort              string   `env:"API_PORT"`
 	RestBaseURL          string   `env:"REST_BASE_URL"`
 	MatchEngineURL       string   `env:"MATCH_ENGINE_URL"`
+	RollupRestEndpoint   string   `env:"ROLLUP_REST_ENDPOINT"`
 	CORSAllowedOrigins   []string `env:"CORS_ALLOWED_ORIGINS"`
 	CORSAllowCredentials bool     `env:"CORS_ALLOW_CREDENTIALS"`
 	Debug                bool     `env:"DEBUG"`
@@ -141,6 +142,9 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	if cfg.MatchEngineURL, err = getRequiredEnvString("MATCH_ENGINE_URL"); err != nil {
+		return nil, err
+	}
+	if cfg.RollupRestEndpoint, err = getRequiredEnvString("ROLLUP_REST_ENDPOINT"); err != nil {
 		return nil, err
 	}
 	if cfg.CORSAllowedOrigins, err = getRequiredEnvStringSlice("CORS_ALLOWED_ORIGINS"); err != nil {

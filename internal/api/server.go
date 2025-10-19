@@ -49,7 +49,7 @@ func NewServer(cfg *config.Config) (*Server, error) {
 	}
 
 	// Create handlers
-	handler, err := handlers.New(cfg.SequencerAddr, cfg.RestBaseURL, cfg.MatchEngineURL, repo)
+	handler, err := handlers.New(cfg.SequencerAddr, cfg.RestBaseURL, cfg.MatchEngineURL, cfg.RollupRestEndpoint, repo)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create handlers: %w", err)
 	}
@@ -142,6 +142,16 @@ func (s *Server) setupRoutes() {
 			me.GET("/accounts/:pubkey", s.handler.GetUserAccounts)
 			me.GET("/users/:pubkey/pnl", s.handler.GetUserPNL)
 			me.POST("/airdrop/:receiverPubKey/:tokenName", s.handler.PostAirdrop)
+		}
+
+		// Rollup routes (proxy to rollup REST API)
+		rollup := v1.Group("/rollup")
+		{
+			rollup.GET("/status", s.handler.GetRollupStatus)
+			rollup.GET("/blocks/latest", s.handler.GetRollupLatestBlock)
+			rollup.GET("/blocks", s.handler.GetRollupBlocks)
+			rollup.GET("/blocks/:height", s.handler.GetRollupBlockByHeight)
+			rollup.GET("/transactions/:id", s.handler.GetRollupTransactionById)
 		}
 	}
 }

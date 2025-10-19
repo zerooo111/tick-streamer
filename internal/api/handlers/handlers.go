@@ -28,11 +28,12 @@ type Handler struct {
 	grpcConn       *grpc.ClientConn
 	restBaseURL    string
 	matchEngineURL string
+	rollupRestURL  string
 	httpClient     *http.Client
 	repository     repository.Repository
 }
 
-func New(grpcAddr, restBaseURL, matchEngineURL string, repo repository.Repository) (*Handler, error) {
+func New(grpcAddr, restBaseURL, matchEngineURL, rollupRestURL string, repo repository.Repository) (*Handler, error) {
 	// Create gRPC connection
 	conn, err := grpc.NewClient(grpcAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
@@ -44,6 +45,7 @@ func New(grpcAddr, restBaseURL, matchEngineURL string, repo repository.Repositor
 		grpcConn:       conn,
 		restBaseURL:    restBaseURL,
 		matchEngineURL: matchEngineURL,
+		rollupRestURL:  rollupRestURL,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
@@ -1064,10 +1066,200 @@ func (h *Handler) makeSecureRequest(method, url string, body interface{}) (*http
 
 	req.Header.Set("User-Agent", "fermi-explorer-go-proxy/1.0")
 	req.Header.Set("Accept", "application/json")
-	
+
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
 
 	return h.httpClient.Do(req)
+}
+
+// Rollup endpoints
+
+// GetRollupStatus retrieves the status from the rollup service
+func (h *Handler) GetRollupStatus(c *gin.Context) {
+	resp, err := h.makeSecureRequest("GET", h.rollupRestURL+"/status", nil)
+	if err != nil {
+		apiErrors.ServiceUnavailableError(c, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		apiErrors.ServiceUnavailableError(c, fmt.Errorf("rollup service returned status %d", resp.StatusCode))
+		return
+	}
+
+	var data interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		apiErrors.InternalError(c, err)
+		return
+	}
+
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.Header("X-Data-Source", "rollup-rest-api")
+	c.JSON(http.StatusOK, data)
+}
+
+// GetRollupLatestBlock retrieves the latest block from the rollup service
+func (h *Handler) GetRollupLatestBlock(c *gin.Context) {
+	resp, err := h.makeSecureRequest("GET", h.rollupRestURL+"/blocks/latest", nil)
+	if err != nil {
+		apiErrors.ServiceUnavailableError(c, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		apiErrors.ServiceUnavailableError(c, fmt.Errorf("rollup service returned status %d", resp.StatusCode))
+		return
+	}
+
+	var data interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		apiErrors.InternalError(c, err)
+		return
+	}
+
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.Header("X-Data-Source", "rollup-rest-api")
+	c.JSON(http.StatusOK, data)
+}
+
+// GetRollupBlocks retrieves blocks from the rollup service with optional pagination
+func (h *Handler) GetRollupBlocks(c *gin.Context) {
+	// Get limit and offset query parameters
+	limit := c.Query("limit")
+	offset := c.Query("offset")
+
+	// Build query parameters
+	queryParams := url.Values{}
+	if limit != "" {
+		if limitVal, err := strconv.Atoi(limit); err == nil && limitVal > 0 && limitVal <= 1000 {
+			queryParams.Set("limit", limit)
+		} else {
+			apiErrors.BadRequestError(c, "Invalid limit parameter (must be 1-1000)")
+			return
+		}
+	}
+	if offset != "" {
+		if offsetVal, err := strconv.Atoi(offset); err == nil && offsetVal >= 0 {
+			queryParams.Set("offset", offset)
+		} else {
+			apiErrors.BadRequestError(c, "Invalid offset parameter (must be >= 0)")
+			return
+		}
+	}
+
+	// Build URL with query parameters
+	targetURL := h.rollupRestURL + "/blocks"
+	if len(queryParams) > 0 {
+		targetURL += "?" + queryParams.Encode()
+	}
+
+	resp, err := h.makeSecureRequest("GET", targetURL, nil)
+	if err != nil {
+		apiErrors.ServiceUnavailableError(c, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		apiErrors.ServiceUnavailableError(c, fmt.Errorf("rollup service returned status %d", resp.StatusCode))
+		return
+	}
+
+	var data interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		apiErrors.InternalError(c, err)
+		return
+	}
+
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.Header("X-Data-Source", "rollup-rest-api")
+	c.JSON(http.StatusOK, data)
+}
+
+// GetRollupBlockByHeight retrieves a specific block by height from the rollup service
+func (h *Handler) GetRollupBlockByHeight(c *gin.Context) {
+	height := middleware.SanitizeInput(c.Param("height"))
+
+	if height == "" {
+		apiErrors.BadRequestError(c, "Block height is required")
+		return
+	}
+
+	// Validate height is a number
+	if _, err := strconv.ParseUint(height, 10, 64); err != nil {
+		apiErrors.BadRequestError(c, "Invalid block height: must be a positive number")
+		return
+	}
+
+	targetURL := h.rollupRestURL + "/blocks/" + url.PathEscape(height)
+
+	resp, err := h.makeSecureRequest("GET", targetURL, nil)
+	if err != nil {
+		apiErrors.ServiceUnavailableError(c, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		apiErrors.NotFoundError(c, "Block")
+		return
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		apiErrors.ServiceUnavailableError(c, fmt.Errorf("rollup service returned status %d", resp.StatusCode))
+		return
+	}
+
+	var data interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		apiErrors.InternalError(c, err)
+		return
+	}
+
+	c.Header("Cache-Control", "public, max-age=60")
+	c.Header("X-Data-Source", "rollup-rest-api")
+	c.JSON(http.StatusOK, data)
+}
+
+// GetRollupTransactionById retrieves a specific transaction by ID from the rollup service
+func (h *Handler) GetRollupTransactionById(c *gin.Context) {
+	txID := middleware.SanitizeInput(c.Param("id"))
+
+	if txID == "" {
+		apiErrors.BadRequestError(c, "Transaction ID is required")
+		return
+	}
+
+	targetURL := h.rollupRestURL + "/transactions/" + url.PathEscape(txID)
+
+	resp, err := h.makeSecureRequest("GET", targetURL, nil)
+	if err != nil {
+		apiErrors.ServiceUnavailableError(c, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		apiErrors.NotFoundError(c, "Transaction")
+		return
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		apiErrors.ServiceUnavailableError(c, fmt.Errorf("rollup service returned status %d", resp.StatusCode))
+		return
+	}
+
+	var data interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		apiErrors.InternalError(c, err)
+		return
+	}
+
+	c.Header("Cache-Control", "public, max-age=60")
+	c.Header("X-Data-Source", "rollup-rest-api")
+	c.JSON(http.StatusOK, data)
 }
