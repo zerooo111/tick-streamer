@@ -51,6 +51,13 @@ func main() {
 		}
 	}()
 
+	// Configure connection pool for better resilience
+	db.SetMaxOpenConns(10)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(5 * time.Minute)
+	db.SetConnMaxIdleTime(1 * time.Minute)
+	log.Println("⚙️  Database connection pool configured (max_open=10, max_idle=5)")
+
 	log.Printf("🏓 Testing database connection...")
 	if err := pingWithTimeout(db, 10*time.Second); err != nil {
 		log.Fatalf("❌ Failed to ping database: %v", err)
@@ -85,15 +92,50 @@ func main() {
 
 	log.Println("🎯 Starting price ingestion...")
 	ctx, cancel := context.WithCancel(context.Background())
-	go ing.Start(ctx)
+
+	// Run ingestor with panic recovery
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("🚨 PANIC in ingestor: %v", r)
+				log.Println("⚠️  Attempting to restart ingestor...")
+				// Wait a bit before restarting
+				time.Sleep(5 * time.Second)
+				// Restart the ingestor
+				go ing.Start(ctx)
+			}
+		}()
+		ing.Start(ctx)
+	}()
 
 	log.Println("✅ Ingestor started successfully. Press Ctrl+C to stop.")
+
+	// Periodic health check
+	go func() {
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				// Test database connection periodically
+				if err := pingWithTimeout(db, 5*time.Second); err != nil {
+					log.Printf("⚠️  Health check: Database ping failed: %v", err)
+				} else {
+					log.Println("💚 Health check: Database connection OK")
+				}
+			}
+		}
+	}()
+
 	waitForSignal()
-	
+
 	log.Println("🛑 Shutdown signal received...")
 	cancel()
-	// Allow a brief shutdown period
-	time.Sleep(300 * time.Millisecond)
+	// Allow graceful shutdown period
+	time.Sleep(2 * time.Second)
 	log.Println("🏁 Shutdown complete")
 }
 
