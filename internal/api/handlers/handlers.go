@@ -708,37 +708,6 @@ func (h *Handler) GetUserAccounts(c *gin.Context) {
 	c.JSON(http.StatusOK, data)
 }
 
-// Get positions (position snapshots)
-func (h *Handler) GetPositions(c *gin.Context) {
-	targetURL := h.matchEngineURL + "/positions"
-
-	// Add optional owner query parameter
-	owner := c.Query("owner")
-	if owner != "" {
-		targetURL += "?owner=" + url.QueryEscape(owner)
-	}
-
-	resp, err := h.makeSecureRequest("GET", targetURL, nil)
-	if err != nil {
-		apiErrors.InternalError(c, fmt.Errorf("failed to get positions"))
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		middleware.SendErrorResponse(c, http.StatusBadGateway, "Failed to get positions", nil)
-		return
-	}
-
-	var data interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		apiErrors.InternalError(c, err)
-		return
-	}
-
-	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
-	c.JSON(http.StatusOK, data)
-}
 
 
 // Get liquidations
@@ -767,81 +736,6 @@ func (h *Handler) GetLiquidations(c *gin.Context) {
 	c.JSON(http.StatusOK, data)
 }
 
-// Get market stats
-func (h *Handler) GetMarketStats(c *gin.Context) {
-	marketUUID := middleware.SanitizeInput(c.Param("marketId"))
-
-	if marketUUID == "" {
-		apiErrors.BadRequestError(c, "Market UUID is required")
-		return
-	}
-
-	targetURL := h.matchEngineURL + "/markets/" + url.PathEscape(marketUUID) + "/stats"
-
-	resp, err := h.makeSecureRequest("GET", targetURL, nil)
-	if err != nil {
-		apiErrors.InternalError(c, fmt.Errorf("failed to get market stats"))
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusNotFound {
-		apiErrors.NotFoundError(c, "Market stats")
-		return
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		middleware.SendErrorResponse(c, http.StatusBadGateway, "Failed to get market stats", nil)
-		return
-	}
-
-	var data interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		apiErrors.InternalError(c, err)
-		return
-	}
-
-	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
-	c.JSON(http.StatusOK, data)
-}
-
-// Get user PNL
-func (h *Handler) GetUserPNL(c *gin.Context) {
-	ownerPubkey := middleware.SanitizeInput(c.Param("pubkey"))
-
-	if ownerPubkey == "" {
-		apiErrors.BadRequestError(c, "Owner public key is required")
-		return
-	}
-
-	targetURL := h.matchEngineURL + "/users/" + url.PathEscape(ownerPubkey) + "/pnl"
-
-	resp, err := h.makeSecureRequest("GET", targetURL, nil)
-	if err != nil {
-		apiErrors.InternalError(c, fmt.Errorf("failed to get user PNL"))
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusNotFound {
-		apiErrors.NotFoundError(c, "User PNL")
-		return
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		middleware.SendErrorResponse(c, http.StatusBadGateway, "Failed to get user PNL", nil)
-		return
-	}
-
-	var data interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		apiErrors.InternalError(c, err)
-		return
-	}
-
-	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
-	c.JSON(http.StatusOK, data)
-}
 
 // Post airdrop
 func (h *Handler) PostAirdrop(c *gin.Context) {
@@ -903,6 +797,7 @@ func (h *Handler) Root(c *gin.Context) {
 		"service":  "fermi-explorer-go-backend",
 		"version":  "1.0.0",
 		"endpoints": gin.H{
+			// Core endpoints
 			"health":           "/api/v1/health",
 			"status":           "/api/v1/status",
 			"sequencer_status": "/api/v1/sequencer/status",
@@ -913,24 +808,37 @@ func (h *Handler) Root(c *gin.Context) {
 			"tick":             "/api/v1/tick/{number}",
 			"recent_ticks":     "/api/v1/ticks/recent",
 			"chain_state":      "/api/v1/chain/state",
+
+			// WebSocket endpoints
 			"websocket_ticks":  "/ws/ticks",
 			"websocket_market_stats": "/ws/market-stats",
-			"markets":          "/api/v1/me/markets",
-			"create_market":    "/api/v1/me/markets",
-			"market_orderbook": "/api/v1/me/markets/{marketId}/orderbook",
-			"market_orderbook_summary": "/api/v1/me/markets/{marketId}/orderbook/summary",
-			"market_trades":    "/api/v1/me/markets/{marketId}/trades",
-			"market_stats":     "/api/v1/me/markets/{marketId}/stats",
-			"market_candles":   "/api/v1/me/markets/{marketId}/candles?tf=1h&from=ISO&to=ISO",
-			"user_orders":      "/api/v1/me/orders/user/{pubkey}",
-			"user_balances":    "/api/v1/me/balances/{pubkey}",
-			"user_accounts":    "/api/v1/me/accounts/{pubkey}",
-			"user_pnl":         "/api/v1/me/users/{pubkey}/pnl",
-			"positions":        "/api/v1/me/positions",
-			"margin_deposit":   "/api/v1/me/margin/deposit",
-			"margin_withdraw":  "/api/v1/me/margin/withdraw",
-			"airdrop":          "/api/v1/me/airdrop/{receiverPubKey}/{tokenName}",
-			"liquidations":     "/api/v1/me/liquidations",
+
+			// Rollup chain endpoints
+			"rollup_status":    "/api/v1/rollup/status",
+			"rollup_blocks_latest": "/api/v1/rollup/blocks/latest",
+			"rollup_blocks":    "/api/v1/rollup/blocks",
+			"rollup_block_by_height": "/api/v1/rollup/blocks/{height}",
+			"rollup_transaction": "/api/v1/rollup/transactions/{id}",
+			"rollup_events":    "/api/v1/rollup/events",
+
+			// Market endpoints
+			"markets":          "/api/v1/rollup/markets",
+			"market_orderbook": "/api/v1/rollup/markets/{marketId}/orderbook",
+			"market_orderbook_summary": "/api/v1/rollup/markets/{marketId}/orderbook/summary",
+			"market_depth":     "/api/v1/rollup/markets/{marketId}/depth",
+			"market_trades":    "/api/v1/rollup/markets/{marketId}/trades",
+			"market_funding":   "/api/v1/rollup/markets/{marketId}/funding",
+			"market_candles":   "/api/v1/rollup/markets/{marketId}/candles?tf=1h&from=ISO&to=ISO",
+
+			// User and account endpoints
+			"user_orders":      "/api/v1/rollup/orders/user/{pubkey}",
+			"user_balances":    "/api/v1/rollup/balances/{pubkey}",
+			"user_accounts":    "/api/v1/rollup/accounts/{pubkey}",
+			"positions":        "/api/v1/rollup/positions?owner={pubkey}&market_id={marketId}",
+			"liquidations":     "/api/v1/rollup/liquidations",
+
+			// Admin endpoints
+			"airdrop":          "/api/v1/rollup/airdrop",
 		},
 	}
 
@@ -1262,4 +1170,598 @@ func (h *Handler) GetRollupTransactionById(c *gin.Context) {
 	c.Header("Cache-Control", "public, max-age=60")
 	c.Header("X-Data-Source", "rollup-rest-api")
 	c.JSON(http.StatusOK, data)
+}
+
+// Rollup handlers for market/trading endpoints (previously under /me)
+
+// GetRollupMarkets retrieves markets from the rollup service
+func (h *Handler) GetRollupMarkets(c *gin.Context) {
+	resp, err := h.makeSecureRequest("GET", h.rollupRestURL+"/markets", nil)
+	if err != nil {
+		apiErrors.InternalError(c, fmt.Errorf("failed to get markets from rollup"))
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		apiErrors.ServiceUnavailableError(c, fmt.Errorf("rollup service returned status %d", resp.StatusCode))
+		return
+	}
+
+	var data interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		apiErrors.InternalError(c, err)
+		return
+	}
+
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.Header("X-Data-Source", "rollup-rest-api")
+	c.JSON(http.StatusOK, data)
+}
+
+// GetRollupMarketOrderbook retrieves market orderbook from the rollup service
+func (h *Handler) GetRollupMarketOrderbook(c *gin.Context) {
+	marketID := middleware.SanitizeInput(c.Param("marketId"))
+
+	if marketID == "" {
+		apiErrors.BadRequestError(c, "Market ID is required")
+		return
+	}
+
+	targetURL := h.rollupRestURL + "/markets/" + url.PathEscape(marketID) + "/orderbook"
+
+	resp, err := h.makeSecureRequest("GET", targetURL, nil)
+	if err != nil {
+		apiErrors.InternalError(c, fmt.Errorf("failed to get market orderbook from rollup"))
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		apiErrors.NotFoundError(c, "Market")
+		return
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		apiErrors.ServiceUnavailableError(c, fmt.Errorf("rollup service returned status %d", resp.StatusCode))
+		return
+	}
+
+	var data interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		apiErrors.InternalError(c, err)
+		return
+	}
+
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.Header("X-Data-Source", "rollup-rest-api")
+	c.JSON(http.StatusOK, data)
+}
+
+// GetRollupMarketOrderbookSummary retrieves market orderbook summary from the rollup service
+func (h *Handler) GetRollupMarketOrderbookSummary(c *gin.Context) {
+	marketID := middleware.SanitizeInput(c.Param("marketId"))
+
+	if marketID == "" {
+		apiErrors.BadRequestError(c, "Market ID is required")
+		return
+	}
+
+	targetURL := h.rollupRestURL + "/markets/" + url.PathEscape(marketID) + "/orderbook/summary"
+
+	resp, err := h.makeSecureRequest("GET", targetURL, nil)
+	if err != nil {
+		apiErrors.InternalError(c, fmt.Errorf("failed to get market orderbook summary from rollup"))
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		apiErrors.NotFoundError(c, "Market")
+		return
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		apiErrors.ServiceUnavailableError(c, fmt.Errorf("rollup service returned status %d", resp.StatusCode))
+		return
+	}
+
+	var data interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		apiErrors.InternalError(c, err)
+		return
+	}
+
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.Header("X-Data-Source", "rollup-rest-api")
+	c.JSON(http.StatusOK, data)
+}
+
+// GetRollupMarketTrades retrieves market trades from the rollup service
+func (h *Handler) GetRollupMarketTrades(c *gin.Context) {
+	marketID := middleware.SanitizeInput(c.Param("marketId"))
+
+	if marketID == "" {
+		apiErrors.BadRequestError(c, "Market ID is required")
+		return
+	}
+
+	targetURL := h.rollupRestURL + "/markets/" + url.PathEscape(marketID) + "/trades"
+
+	resp, err := h.makeSecureRequest("GET", targetURL, nil)
+	if err != nil {
+		apiErrors.InternalError(c, fmt.Errorf("failed to get market trades from rollup"))
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		apiErrors.NotFoundError(c, "Market")
+		return
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		apiErrors.ServiceUnavailableError(c, fmt.Errorf("rollup service returned status %d", resp.StatusCode))
+		return
+	}
+
+	var data interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		apiErrors.InternalError(c, err)
+		return
+	}
+
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.Header("X-Data-Source", "rollup-rest-api")
+	c.JSON(http.StatusOK, data)
+}
+
+// GetRollupMarketDepth retrieves market depth from the rollup service
+func (h *Handler) GetRollupMarketDepth(c *gin.Context) {
+	marketID := middleware.SanitizeInput(c.Param("marketId"))
+
+	if marketID == "" {
+		apiErrors.BadRequestError(c, "Market ID is required")
+		return
+	}
+
+	targetURL := h.rollupRestURL + "/markets/" + url.PathEscape(marketID) + "/depth"
+
+	resp, err := h.makeSecureRequest("GET", targetURL, nil)
+	if err != nil {
+		apiErrors.InternalError(c, fmt.Errorf("failed to get market depth from rollup"))
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		apiErrors.NotFoundError(c, "Market")
+		return
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		apiErrors.ServiceUnavailableError(c, fmt.Errorf("rollup service returned status %d", resp.StatusCode))
+		return
+	}
+
+	var data interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		apiErrors.InternalError(c, err)
+		return
+	}
+
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.Header("X-Data-Source", "rollup-rest-api")
+	c.JSON(http.StatusOK, data)
+}
+
+// GetRollupMarketFunding retrieves market funding information from the rollup service
+func (h *Handler) GetRollupMarketFunding(c *gin.Context) {
+	marketID := middleware.SanitizeInput(c.Param("marketId"))
+
+	if marketID == "" {
+		apiErrors.BadRequestError(c, "Market ID is required")
+		return
+	}
+
+	targetURL := h.rollupRestURL + "/markets/" + url.PathEscape(marketID) + "/funding"
+
+	resp, err := h.makeSecureRequest("GET", targetURL, nil)
+	if err != nil {
+		apiErrors.InternalError(c, fmt.Errorf("failed to get market funding from rollup"))
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		apiErrors.NotFoundError(c, "Market")
+		return
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		apiErrors.ServiceUnavailableError(c, fmt.Errorf("rollup service returned status %d", resp.StatusCode))
+		return
+	}
+
+	var data interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		apiErrors.InternalError(c, err)
+		return
+	}
+
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.Header("X-Data-Source", "rollup-rest-api")
+	c.JSON(http.StatusOK, data)
+}
+
+// GetRollupPositions retrieves positions from the rollup service
+func (h *Handler) GetRollupPositions(c *gin.Context) {
+	// Build query parameters
+	queryParams := url.Values{}
+
+	// Add optional owner filter
+	if owner := c.Query("owner"); owner != "" {
+		queryParams.Set("owner", owner)
+	}
+
+	// Add optional market_id filter
+	if marketID := c.Query("market_id"); marketID != "" {
+		queryParams.Set("market_id", marketID)
+	}
+
+	targetURL := h.rollupRestURL + "/positions"
+	if len(queryParams) > 0 {
+		targetURL += "?" + queryParams.Encode()
+	}
+
+	resp, err := h.makeSecureRequest("GET", targetURL, nil)
+	if err != nil {
+		apiErrors.InternalError(c, fmt.Errorf("failed to get positions from rollup"))
+		return
+	}
+	defer resp.Body.Close()
+
+	// Handle 400 Bad Request for invalid query parameters
+	if resp.StatusCode == http.StatusBadRequest {
+		var errorData interface{}
+		if decodeErr := json.NewDecoder(resp.Body).Decode(&errorData); decodeErr == nil {
+			c.JSON(http.StatusBadRequest, errorData)
+			return
+		}
+		apiErrors.BadRequestError(c, "Invalid query parameters")
+		return
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		apiErrors.ServiceUnavailableError(c, fmt.Errorf("rollup service returned status %d", resp.StatusCode))
+		return
+	}
+
+	var data interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		apiErrors.InternalError(c, err)
+		return
+	}
+
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.Header("X-Data-Source", "rollup-rest-api")
+	c.JSON(http.StatusOK, data)
+}
+
+// GetRollupMarketCandles retrieves market candles from the rollup service
+func (h *Handler) GetRollupMarketCandles(c *gin.Context) {
+	marketID := middleware.SanitizeInput(c.Param("marketId"))
+	if marketID == "" {
+		apiErrors.BadRequestError(c, "Market ID is required")
+		return
+	}
+
+	// Build query parameters
+	queryParams := url.Values{}
+	if tf := c.Query("tf"); tf != "" {
+		queryParams.Set("tf", tf)
+	}
+	if from := c.Query("from"); from != "" {
+		queryParams.Set("from", from)
+	}
+	if to := c.Query("to"); to != "" {
+		queryParams.Set("to", to)
+	}
+
+	targetURL := h.rollupRestURL + "/markets/" + url.PathEscape(marketID) + "/candles"
+	if len(queryParams) > 0 {
+		targetURL += "?" + queryParams.Encode()
+	}
+
+	resp, err := h.makeSecureRequest("GET", targetURL, nil)
+	if err != nil {
+		apiErrors.InternalError(c, fmt.Errorf("failed to get market candles from rollup"))
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		apiErrors.NotFoundError(c, "Market")
+		return
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		apiErrors.ServiceUnavailableError(c, fmt.Errorf("rollup service returned status %d", resp.StatusCode))
+		return
+	}
+
+	var data interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		apiErrors.InternalError(c, err)
+		return
+	}
+
+	c.Header("Cache-Control", "public, max-age=5")
+	c.Header("X-Data-Source", "rollup-rest-api")
+	c.JSON(http.StatusOK, data)
+}
+
+// GetRollupUserOrders retrieves user orders from the rollup service
+func (h *Handler) GetRollupUserOrders(c *gin.Context) {
+	pubkey := middleware.SanitizeInput(c.Param("pubkey"))
+
+	if pubkey == "" {
+		apiErrors.BadRequestError(c, "Public key is required")
+		return
+	}
+
+	targetURL := h.rollupRestURL + "/orders/user/" + url.PathEscape(pubkey)
+
+	resp, err := h.makeSecureRequest("GET", targetURL, nil)
+	if err != nil {
+		apiErrors.InternalError(c, fmt.Errorf("failed to get user orders from rollup"))
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		apiErrors.NotFoundError(c, "User orders")
+		return
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		apiErrors.ServiceUnavailableError(c, fmt.Errorf("rollup service returned status %d", resp.StatusCode))
+		return
+	}
+
+	var data interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		apiErrors.InternalError(c, err)
+		return
+	}
+
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.Header("X-Data-Source", "rollup-rest-api")
+	c.JSON(http.StatusOK, data)
+}
+
+// GetRollupUserBalances retrieves user balances from the rollup service
+func (h *Handler) GetRollupUserBalances(c *gin.Context) {
+	pubkey := middleware.SanitizeInput(c.Param("pubkey"))
+
+	if pubkey == "" {
+		apiErrors.BadRequestError(c, "Public key is required")
+		return
+	}
+
+	targetURL := h.rollupRestURL + "/balances/" + url.PathEscape(pubkey)
+
+	resp, err := h.makeSecureRequest("GET", targetURL, nil)
+	if err != nil {
+		apiErrors.InternalError(c, fmt.Errorf("failed to get user balances from rollup"))
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		apiErrors.NotFoundError(c, "User balances")
+		return
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		apiErrors.ServiceUnavailableError(c, fmt.Errorf("rollup service returned status %d", resp.StatusCode))
+		return
+	}
+
+	var data interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		apiErrors.InternalError(c, err)
+		return
+	}
+
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.Header("X-Data-Source", "rollup-rest-api")
+	c.JSON(http.StatusOK, data)
+}
+
+// GetRollupUserAccounts retrieves user accounts from the rollup service
+func (h *Handler) GetRollupUserAccounts(c *gin.Context) {
+	pubkey := middleware.SanitizeInput(c.Param("pubkey"))
+
+	if pubkey == "" {
+		apiErrors.BadRequestError(c, "Public key is required")
+		return
+	}
+
+	targetURL := h.rollupRestURL + "/accounts/" + url.PathEscape(pubkey)
+
+	resp, err := h.makeSecureRequest("GET", targetURL, nil)
+	if err != nil {
+		apiErrors.InternalError(c, fmt.Errorf("failed to get user accounts from rollup"))
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		apiErrors.NotFoundError(c, "User accounts")
+		return
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		apiErrors.ServiceUnavailableError(c, fmt.Errorf("rollup service returned status %d", resp.StatusCode))
+		return
+	}
+
+	var data interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		apiErrors.InternalError(c, err)
+		return
+	}
+
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.Header("X-Data-Source", "rollup-rest-api")
+	c.JSON(http.StatusOK, data)
+}
+
+// GetRollupLiquidations retrieves liquidations from the rollup service
+func (h *Handler) GetRollupLiquidations(c *gin.Context) {
+	targetURL := h.rollupRestURL + "/liquidations"
+
+	resp, err := h.makeSecureRequest("GET", targetURL, nil)
+	if err != nil {
+		apiErrors.InternalError(c, fmt.Errorf("failed to get liquidations from rollup"))
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		apiErrors.ServiceUnavailableError(c, fmt.Errorf("rollup service returned status %d", resp.StatusCode))
+		return
+	}
+
+	var data interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		apiErrors.InternalError(c, err)
+		return
+	}
+
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.Header("X-Data-Source", "rollup-rest-api")
+	c.JSON(http.StatusOK, data)
+}
+
+// GetRollupEvents retrieves events from the rollup service
+func (h *Handler) GetRollupEvents(c *gin.Context) {
+	// Build query parameters for pagination or filtering if needed
+	queryParams := url.Values{}
+
+	// Forward any query parameters from the request
+	for key, values := range c.Request.URL.Query() {
+		for _, value := range values {
+			queryParams.Add(key, value)
+		}
+	}
+
+	targetURL := h.rollupRestURL + "/events"
+	if len(queryParams) > 0 {
+		targetURL += "?" + queryParams.Encode()
+	}
+
+	resp, err := h.makeSecureRequest("GET", targetURL, nil)
+	if err != nil {
+		apiErrors.InternalError(c, fmt.Errorf("failed to get events from rollup"))
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		apiErrors.ServiceUnavailableError(c, fmt.Errorf("rollup service returned status %d", resp.StatusCode))
+		return
+	}
+
+	var data interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		apiErrors.InternalError(c, err)
+		return
+	}
+
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.Header("X-Data-Source", "rollup-rest-api")
+	c.JSON(http.StatusOK, data)
+}
+
+
+// AirdropRequest represents the JSON body for airdrop requests
+type AirdropRequest struct {
+	Recipient string `json:"recipient" binding:"required"`
+	TokenMint string `json:"token_mint" binding:"required"`
+	Amount    uint64 `json:"amount" binding:"required"`
+}
+
+// PostRollupAirdrop handles airdrop requests to the rollup service
+func (h *Handler) PostRollupAirdrop(c *gin.Context) {
+	var req AirdropRequest
+
+	// Parse JSON request body
+	if err := c.ShouldBindJSON(&req); err != nil {
+		apiErrors.BadRequestError(c, "Invalid request body: "+err.Error())
+		return
+	}
+
+	// Validate recipient and token_mint are non-empty (already checked by binding, but explicit)
+	if req.Recipient == "" {
+		apiErrors.BadRequestError(c, "Recipient is required")
+		return
+	}
+
+	if req.TokenMint == "" {
+		apiErrors.BadRequestError(c, "Token mint is required")
+		return
+	}
+
+	// Forward the request to the rollup service
+	targetURL := h.rollupRestURL + "/airdrop"
+
+	// Pass the request object directly - makeSecureRequest will handle marshaling
+	resp, err := h.makeSecureRequest("POST", targetURL, req)
+	if err != nil {
+		fmt.Printf("ERROR: Failed to post airdrop to rollup: %v\n", err)
+		apiErrors.InternalError(c, fmt.Errorf("failed to post airdrop to rollup: %w", err))
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		apiErrors.NotFoundError(c, "Airdrop")
+		return
+	}
+
+	if resp.StatusCode == http.StatusServiceUnavailable {
+		apiErrors.ServiceUnavailableError(c, fmt.Errorf("continuum endpoint not configured"))
+		return
+	}
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		// Try to read error message from response body
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		fmt.Printf("ERROR: Rollup service returned status %d, body: %s\n", resp.StatusCode, string(bodyBytes))
+
+		var errorData map[string]interface{}
+		if decodeErr := json.Unmarshal(bodyBytes, &errorData); decodeErr == nil {
+			if errMsg, ok := errorData["error"].(string); ok {
+				c.JSON(resp.StatusCode, gin.H{
+					"error": errMsg,
+				})
+				return
+			}
+		}
+		c.JSON(resp.StatusCode, gin.H{
+			"error": fmt.Sprintf("Rollup service returned status %d", resp.StatusCode),
+		})
+		return
+	}
+
+	var data interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		apiErrors.InternalError(c, err)
+		return
+	}
+
+	c.Header("X-Data-Source", "rollup-rest-api")
+	c.JSON(resp.StatusCode, data)
 }

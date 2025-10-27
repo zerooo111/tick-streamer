@@ -128,30 +128,35 @@ func (s *Server) setupRoutes() {
 		v1.GET("/chain/state", s.handler.GetChainState)
 		v1.GET("/chain-state", s.handler.GetSequencerStatus)
 
-		// Market routes (proxy to match engine)
-		me := v1.Group("/me")
-		{
-			me.GET("/markets", s.handler.GetMarkets)
-			me.GET("/markets/:marketId/orderbook", s.handler.GetMarketOrderbook)
-			me.GET("/markets/:marketId/orderbook/summary", s.handler.GetMarketOrderbookSummary)
-			me.GET("/markets/:marketId/trades", s.handler.GetMarketTrades)
-			me.GET("/markets/:marketId/stats", s.handler.GetMarketStats)
-			me.GET("/markets/:marketId/candles", s.handler.GetMarketCandles)
-			me.GET("/orders/user/:pubkey", s.handler.GetUserOrders)
-			me.GET("/balances/:pubkey", s.handler.GetUserBalances)
-			me.GET("/accounts/:pubkey", s.handler.GetUserAccounts)
-			me.GET("/users/:pubkey/pnl", s.handler.GetUserPNL)
-			me.POST("/airdrop/:receiverPubKey/:tokenName", s.handler.PostAirdrop)
-		}
-
 		// Rollup routes (proxy to rollup REST API)
 		rollup := v1.Group("/rollup")
 		{
+			// Rollup chain routes
 			rollup.GET("/status", s.handler.GetRollupStatus)
 			rollup.GET("/blocks/latest", s.handler.GetRollupLatestBlock)
 			rollup.GET("/blocks", s.handler.GetRollupBlocks)
 			rollup.GET("/blocks/:height", s.handler.GetRollupBlockByHeight)
 			rollup.GET("/transactions/:id", s.handler.GetRollupTransactionById)
+			rollup.GET("/events", s.handler.GetRollupEvents)
+
+			// Market routes
+			rollup.GET("/markets", s.handler.GetRollupMarkets)
+			rollup.GET("/markets/:marketId/orderbook", s.handler.GetRollupMarketOrderbook)
+			rollup.GET("/markets/:marketId/orderbook/summary", s.handler.GetRollupMarketOrderbookSummary)
+			rollup.GET("/markets/:marketId/depth", s.handler.GetRollupMarketDepth)
+			rollup.GET("/markets/:marketId/trades", s.handler.GetRollupMarketTrades)
+			rollup.GET("/markets/:marketId/funding", s.handler.GetRollupMarketFunding)
+			rollup.GET("/markets/:marketId/candles", s.handler.GetMarketCandles) // Database handler for OHLC data
+
+			// User and account routes
+			rollup.GET("/orders/user/:pubkey", s.handler.GetRollupUserOrders)
+			rollup.GET("/balances/:pubkey", s.handler.GetRollupUserBalances)
+			rollup.GET("/accounts/:pubkey", s.handler.GetRollupUserAccounts)
+			rollup.GET("/positions", s.handler.GetRollupPositions)
+			rollup.GET("/liquidations", s.handler.GetRollupLiquidations)
+
+			// Admin routes
+			rollup.POST("/airdrop", s.handler.PostRollupAirdrop)
 		}
 	}
 }

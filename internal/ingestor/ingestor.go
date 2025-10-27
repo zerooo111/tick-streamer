@@ -143,23 +143,32 @@ func (p *PriceIngestor) logHealthStatus() {
 func (p *PriceIngestor) pollOnce(ctx context.Context) {
     // Fetch all markets and ingest for all perp markets with a mark price
     url := fmt.Sprintf("%s/markets", p.baseURL)
+
+    fetchStart := time.Now()
     req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		p.recordError(fmt.Errorf("failed to create HTTP request: %w", err))
+		p.recordError(fmt.Errorf("HTTP_REQUEST_CREATE_ERROR | URL=%s | Error: %w", url, err))
 		return
 	}
 
 	resp, err := p.client.Do(req)
+	fetchDuration := time.Since(fetchStart)
 	if err != nil {
-		p.recordError(fmt.Errorf("HTTP request failed to %s: %w", url, err))
-		p.tryReconnectDB(ctx)
+		p.recordError(fmt.Errorf("HTTP_REQUEST_FAILED after %v | URL=%s | Timeout=%v | Error: %w",
+			fetchDuration, url, p.client.Timeout, err))
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		p.recordError(fmt.Errorf("HTTP request returned status %d from %s", resp.StatusCode, url))
+		p.recordError(fmt.Errorf("HTTP_INVALID_STATUS | Status=%d | URL=%s | Duration=%v",
+			resp.StatusCode, url, fetchDuration))
 		return
+	}
+
+	// Log slow HTTP requests
+	if fetchDuration > 1*time.Second {
+		log.Printf("⚠️  Slow HTTP request: %v | URL=%s", fetchDuration, url)
 	}
 
     var markets []struct {
@@ -171,18 +180,23 @@ func (p *PriceIngestor) pollOnce(ctx context.Context) {
         } `json:"perp_state"`
     }
     if err := json.NewDecoder(resp.Body).Decode(&markets); err != nil {
-        p.recordError(fmt.Errorf("failed to decode markets JSON: %w", err))
+        p.recordError(fmt.Errorf("JSON_DECODE_ERROR | URL=%s | ContentType=%s | Error: %w",
+            url, resp.Header.Get("Content-Type"), err))
         return
     }
+
+    log.Printf("📡 Fetched %d total markets from API in %v", len(markets), fetchDuration)
 
     now := time.Now().UTC()
     insertedCount := 0
     dbErrors := 0
+    var perpMarkets []string
 
     for _, m := range markets {
         if m.Kind != "perp" || m.PerpState == nil || m.PerpState.MarkPrice == nil {
             continue
         }
+        perpMarkets = append(perpMarkets, m.UUID)
         marketID := m.UUID
         price := *m.PerpState.MarkPrice
         ts := now
@@ -201,50 +215,119 @@ func (p *PriceIngestor) pollOnce(ctx context.Context) {
         lastIns := st.lastInsert
         write := p.shouldInsert(prev, price) || lastIns.IsZero() || now.Sub(lastIns) >= p.heartbeatInterval
         if write {
-            ctxDB, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+            dbTimeout := 500 * time.Millisecond
+            ctxDB, cancel := context.WithTimeout(ctx, dbTimeout)
+            insertStart := time.Now()
             _, err := p.insertStmt.ExecContext(ctxDB, marketID, ts, price)
+            insertDuration := time.Since(insertStart)
             cancel()
             if err != nil {
                 dbErrors++
-                log.Printf("❌ Database insert failed for market %s: %v", marketID, err)
+                log.Printf("❌ Database insert failed after %v (timeout=%v) | Market=%s | Price=%.8f | TS=%s | Error: %v",
+                    insertDuration, dbTimeout, marketID, price, ts.Format(time.RFC3339), err)
                 p.stateMu.Unlock()
                 p.tryReconnectDB(ctx)
                 continue
             }
             st.lastInsert = now
             insertedCount++
+
+            // Log slow inserts as warnings
+            if insertDuration > 200*time.Millisecond {
+                log.Printf("⚠️  Slow database insert: %v | Market=%s | Price=%.8f", insertDuration, marketID, price)
+            }
         }
         st.lastPrice = price
         p.stateMu.Unlock()
+    }
+
+    // Log which perp markets were found
+    if len(perpMarkets) > 0 {
+        log.Printf("📊 Found %d perp markets with mark prices: %v", len(perpMarkets), perpMarkets)
+    } else {
+        log.Printf("⚠️  No perp markets with mark prices found")
     }
 
     // Record success if we got here
     if dbErrors == 0 {
         p.recordSuccess()
         if insertedCount > 0 {
-            log.Printf("✅ Successfully inserted %d market prices", insertedCount)
+            skippedCount := len(perpMarkets) - insertedCount
+            if skippedCount > 0 {
+                log.Printf("✅ Successfully inserted %d market prices (%d skipped due to no price change)", insertedCount, skippedCount)
+            } else {
+                log.Printf("✅ Successfully inserted %d market prices", insertedCount)
+            }
         }
     } else {
-        p.recordError(fmt.Errorf("%d database insert errors occurred", dbErrors))
+        successCount := len(perpMarkets) - dbErrors
+        p.recordError(fmt.Errorf("%d database insert errors occurred (succeeded=%d, failed=%d)", dbErrors, successCount, dbErrors))
     }
 }
 
-// recordError tracks errors and logs them
+// recordError tracks errors and logs them with categorization
 func (p *PriceIngestor) recordError(err error) {
     p.stateMu.Lock()
     defer p.stateMu.Unlock()
 
     p.consecutiveErrors++
     p.totalErrors++
-    p.lastErrorTime = time.Now()
+    now := time.Now()
+    timeSinceLastError := now.Sub(p.lastErrorTime)
+    p.lastErrorTime = now
 
-    log.Printf("❌ ERROR (consecutive=%d, total=%d): %v", p.consecutiveErrors, p.totalErrors, err)
-
-    if p.consecutiveErrors == 5 {
-        log.Printf("⚠️  WARNING: 5 consecutive errors detected - system may be unhealthy")
-    } else if p.consecutiveErrors == 20 {
-        log.Printf("🚨 CRITICAL: 20 consecutive errors - check network/database connectivity!")
+    // Categorize error type for better diagnostics
+    errStr := err.Error()
+    var category string
+    switch {
+    case containsAny(errStr, "HTTP_REQUEST_FAILED", "HTTP_REQUEST_CREATE_ERROR", "HTTP_INVALID_STATUS"):
+        category = "NETWORK"
+    case containsAny(errStr, "Database insert failed", "database insert errors"):
+        category = "DATABASE"
+    case containsAny(errStr, "JSON_DECODE_ERROR"):
+        category = "PARSING"
+    default:
+        category = "UNKNOWN"
     }
+
+    log.Printf("❌ [%s] ERROR #%d (consecutive=%d, gap=%v): %v",
+        category, p.totalErrors, p.consecutiveErrors, timeSinceLastError.Round(time.Millisecond), err)
+
+    // Progressive alerting based on consecutive errors
+    if p.consecutiveErrors == 3 {
+        log.Printf("⚠️  WARNING: 3 consecutive %s errors - investigating connectivity", category)
+    } else if p.consecutiveErrors == 5 {
+        log.Printf("⚠️  WARNING: 5 consecutive %s errors - system may be unhealthy", category)
+    } else if p.consecutiveErrors == 10 {
+        log.Printf("🚨 ALERT: 10 consecutive %s errors - manual intervention may be required", category)
+    } else if p.consecutiveErrors == 20 {
+        log.Printf("🚨 CRITICAL: 20 consecutive %s errors - check network/database connectivity immediately!", category)
+    }
+}
+
+func containsAny(s string, substrs ...string) bool {
+    for _, substr := range substrs {
+        if len(s) >= len(substr) && findSubstring(s, substr) {
+            return true
+        }
+    }
+    return false
+}
+
+func findSubstring(s, substr string) bool {
+    for i := 0; i <= len(s)-len(substr); i++ {
+        match := true
+        for j := 0; j < len(substr); j++ {
+            if s[i+j] != substr[j] {
+                match = false
+                break
+            }
+        }
+        if match {
+            return true
+        }
+    }
+    return false
 }
 
 // recordSuccess resets consecutive error counter
@@ -253,7 +336,8 @@ func (p *PriceIngestor) recordSuccess() {
     defer p.stateMu.Unlock()
 
     if p.consecutiveErrors > 0 {
-        log.Printf("✅ Recovered from %d consecutive errors", p.consecutiveErrors)
+        timeSinceError := time.Since(p.lastErrorTime)
+        log.Printf("✅ Recovered from %d consecutive errors after %v", p.consecutiveErrors, timeSinceError.Round(time.Millisecond))
         p.consecutiveErrors = 0
     }
     p.totalSuccess++
@@ -269,23 +353,32 @@ func (p *PriceIngestor) tryReconnectDB(ctx context.Context) {
         return
     }
 
-    log.Printf("🔄 Attempting to reconnect to database...")
+    log.Printf("🔄 Attempting database reconnection (consecutive_errors=%d)...", p.consecutiveErrors)
+    reconnectStart := time.Now()
 
     // Test database connection
-    ctxPing, cancel := context.WithTimeout(ctx, 2*time.Second)
+    pingTimeout := 2 * time.Second
+    ctxPing, cancel := context.WithTimeout(ctx, pingTimeout)
     defer cancel()
 
+    pingStart := time.Now()
     if err := p.db.PingContext(ctxPing); err != nil {
-        log.Printf("❌ Database ping failed: %v", err)
+        pingDuration := time.Since(pingStart)
+        log.Printf("❌ Database ping failed after %v (timeout=%v) | Error: %v", pingDuration, pingTimeout, err)
         return
     }
+    pingDuration := time.Since(pingStart)
+    log.Printf("✅ Database ping successful in %v", pingDuration)
 
     // Try to re-prepare the statement
+    prepareStart := time.Now()
     stmt, err := p.db.Prepare("INSERT INTO market_prices (market_id, ts, price) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING")
     if err != nil {
-        log.Printf("❌ Failed to re-prepare statement: %v", err)
+        prepareDuration := time.Since(prepareStart)
+        log.Printf("❌ Failed to re-prepare statement after %v | Error: %v", prepareDuration, err)
         return
     }
+    prepareDuration := time.Since(prepareStart)
 
     // Close old statement and replace
     if p.insertStmt != nil {
@@ -293,7 +386,9 @@ func (p *PriceIngestor) tryReconnectDB(ctx context.Context) {
     }
     p.insertStmt = stmt
 
-    log.Printf("✅ Database connection re-established successfully")
+    totalReconnectDuration := time.Since(reconnectStart)
+    log.Printf("✅ Database connection re-established successfully in %v (ping=%v, prepare=%v) | Cleared %d consecutive errors",
+        totalReconnectDuration, pingDuration, prepareDuration, p.consecutiveErrors)
     p.consecutiveErrors = 0
 }
 

@@ -25,7 +25,7 @@ func main() {
 		log.Fatalf("❌ Failed to load configuration: %v", err)
 	}
 	
-	log.Printf("📡 REST Base URL: %s", cfg.MatchEngineURL)
+	log.Printf("📡 Rollup REST Endpoint: %s", cfg.RollupRestEndpoint)
 
 	// Build TimescaleDB connection string from config
 	connStr := os.Getenv("TIMESCALEDB_CONNECTION_STRING")
@@ -80,7 +80,7 @@ func main() {
 	}
 
 	log.Printf("🔧 Initializing price ingestor...")
-	ing, err := ingestor.NewPriceIngestor(db, cfg.MatchEngineURL, "", opts)
+	ing, err := ingestor.NewPriceIngestor(db, cfg.RollupRestEndpoint, "", opts)
 	if err != nil {
 		log.Fatalf("❌ Failed to initialize ingestor: %v", err)
 	}
